@@ -1,0 +1,275 @@
+name: Validate PWN Submission
+
+# Triggers when a player opens or updates a PR that adds an exploit script.
+# This workflow:
+#   1. Checks that all required files are present (writeup + exploit.py)
+#   2. Pulls the private CI Docker image and starts the vulnerable services
+#   3. Runs the player's exploit script against the live services
+#   4. Verifies the flag hash
+#   5. Posts an automatic comment on the PR with the result
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '*/exploit/exploit.py'
+      - '*/writeups/attack/*.md'
+
+permissions:
+  pull-requests: write   # to post comments on the PR
+  contents: read         # to read repo files
+  packages: read         # to pull from ghcr.io
+
+jobs:
+  validate-pwn:
+    name: Validate PWN
+    runs-on: ubuntu-latest
+
+    steps:
+      # -----------------------------------------------------------------------
+      # STEP 1 — Get the code from the PR branch
+      # -----------------------------------------------------------------------
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # needed to compare with base branch
+
+      # -----------------------------------------------------------------------
+      # STEP 2 — Figure out which machine this PR is targeting
+      # We look at which files changed and extract the machine folder name.
+      # e.g. "vuln-apache-path-traversal/exploit/exploit.py" → "vuln-apache-path-traversal"
+      # -----------------------------------------------------------------------
+      - name: Detect target machine
+        id: detect
+        run: |
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          MACHINE=$(echo "$CHANGED" \
+            | grep -E '^[^/]+/exploit/exploit\.py$' \
+            | head -1 \
+            | cut -d'/' -f1)
+
+          if [ -z "$MACHINE" ]; then
+            echo "is_exploit_pr=false" >> $GITHUB_OUTPUT
+            echo "No exploit/exploit.py detected — skipping PWN validation."
+          else
+            echo "machine=$MACHINE" >> $GITHUB_OUTPUT
+            echo "is_exploit_pr=true" >> $GITHUB_OUTPUT
+            echo "Target machine: $MACHINE"
+          fi
+
+      # -----------------------------------------------------------------------
+      # STEP 3 — Check that all required files are present in the PR
+      # A valid pwn PR must contain: exploit.py AND at least one attack writeup
+      # -----------------------------------------------------------------------
+      - name: Check required files
+        if: steps.detect.outputs.is_exploit_pr == 'true'
+        run: |
+          MACHINE="${{ steps.detect.outputs.machine }}"
+          ERRORS=""
+
+          if [ ! -f "${MACHINE}/exploit/exploit.py" ]; then
+            ERRORS="${ERRORS}\n- Missing: \`${MACHINE}/exploit/exploit.py\`"
+          fi
+
+          WRITEUP_COUNT=$(find "${MACHINE}/writeups/attack/" \
+            -name "*.md" ! -name ".gitkeep" 2>/dev/null | wc -l)
+          if [ "$WRITEUP_COUNT" -eq 0 ]; then
+            ERRORS="${ERRORS}\n- Missing: a writeup file in \`${MACHINE}/writeups/attack/\`"
+          fi
+
+          if [ -n "$ERRORS" ]; then
+            echo -e "Required files missing:${ERRORS}"
+            exit 1
+          fi
+
+          echo "All required files present."
+
+      # -----------------------------------------------------------------------
+      # STEP 4 — Read the expected flag hash from the machine's public README
+      # The SHA-256 hash is the only 64-character hex string in the file.
+      # -----------------------------------------------------------------------
+      - name: Extract expected flag hash from README
+        if: steps.detect.outputs.is_exploit_pr == 'true'
+        id: hash
+        run: |
+          MACHINE="${{ steps.detect.outputs.machine }}"
+          FLAG_HASH=$(grep -E '^[a-f0-9]{64}$' "${MACHINE}/README.md" | head -1)
+
+          if [ -z "$FLAG_HASH" ]; then
+            echo "Could not extract flag hash from ${MACHINE}/README.md"
+            exit 1
+          fi
+
+          echo "flag_hash=$FLAG_HASH" >> $GITHUB_OUTPUT
+          echo "Expected hash: $FLAG_HASH"
+
+      # -----------------------------------------------------------------------
+      # STEP 5 — Pull the private CI image and start the vulnerable services
+      # The image is stored in the private btop-sources org on ghcr.io.
+      # GHCR_PULL_TOKEN must be set in machines-public repo secrets.
+      # -----------------------------------------------------------------------
+      - name: Log in to GitHub Container Registry
+        if: steps.detect.outputs.is_exploit_pr == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PULL_TOKEN }}
+
+      - name: Start Docker services
+        if: steps.detect.outputs.is_exploit_pr == 'true'
+        id: services
+        run: |
+          MACHINE="${{ steps.detect.outputs.machine }}"
+          docker compose -f "${MACHINE}/ci/docker-compose.yml" up -d
+
+          echo "Waiting for services to be ready..."
+          # Poll the service every 10 seconds, up to 60 seconds total
+          for i in $(seq 1 6); do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              --max-time 5 http://localhost:80/ || echo "000")
+
+            if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "403" ]]; then
+              echo "Service is UP (HTTP $HTTP_CODE) after attempt $i"
+              echo "status=up" >> $GITHUB_OUTPUT
+              break
+            fi
+
+            echo "Attempt $i/6 — HTTP $HTTP_CODE — retrying in 10s..."
+            sleep 10
+          done
+
+          if [[ "$(cat $GITHUB_OUTPUT | grep 'status=' | cut -d= -f2)" != "up" ]]; then
+            echo "Service did not become ready in time."
+            echo "status=down" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      # -----------------------------------------------------------------------
+      # STEP 6 — Run the player's exploit script
+      # TARGET_IP=localhost because the Docker container is on the same runner.
+      # We capture stdout, stderr, and the exit code separately.
+      # -----------------------------------------------------------------------
+      - name: Run exploit script
+        if: steps.detect.outputs.is_exploit_pr == 'true'
+        id: exploit
+        run: |
+          MACHINE="${{ steps.detect.outputs.machine }}"
+
+          set +e
+          STDOUT=$(TARGET_IP=localhost TARGET_PORT=80 \
+            python3 "${MACHINE}/exploit/exploit.py" 2>/tmp/exploit_stderr)
+          EXIT_CODE=$?
+          STDERR=$(cat /tmp/exploit_stderr)
+          set -e
+
+          echo "Exit code: $EXIT_CODE"
+          echo "Stdout: $STDOUT"
+          echo "Stderr: $STDERR"
+
+          # Save to outputs for next step
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+          {
+            echo "stdout<<BTOP_EOF"
+            echo "$STDOUT"
+            echo "BTOP_EOF"
+          } >> $GITHUB_OUTPUT
+
+      # -----------------------------------------------------------------------
+      # STEP 7 — Verify the flag hash
+      # Extract the flag value from "FLAG_OBTAINED:FLAG{...}" in stdout,
+      # compute its SHA-256, and compare with the expected hash from the README.
+      # -----------------------------------------------------------------------
+      - name: Verify flag hash
+        if: steps.detect.outputs.is_exploit_pr == 'true'
+        id: verify
+        run: |
+          EXIT_CODE="${{ steps.exploit.outputs.exit_code }}"
+          STDOUT="${{ steps.exploit.outputs.stdout }}"
+          EXPECTED="${{ steps.hash.outputs.flag_hash }}"
+
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "result=rejected" >> $GITHUB_OUTPUT
+            echo "reason=Exploit script returned exit code \`$EXIT_CODE\` — flag was not obtained." \
+              >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          FLAG_VALUE=$(echo "$STDOUT" | grep 'FLAG_OBTAINED:' | sed 's/FLAG_OBTAINED://' | tr -d '[:space:]')
+
+          if [ -z "$FLAG_VALUE" ]; then
+            echo "result=rejected" >> $GITHUB_OUTPUT
+            echo "reason=No \`FLAG_OBTAINED:\` line found in exploit output." >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          ACTUAL=$(echo -n "$FLAG_VALUE" | sha256sum | cut -d' ' -f1)
+          echo "Submitted flag: $FLAG_VALUE"
+          echo "Actual hash:    $ACTUAL"
+          echo "Expected hash:  $EXPECTED"
+
+          if [ "$ACTUAL" = "$EXPECTED" ]; then
+            echo "result=validated" >> $GITHUB_OUTPUT
+            echo "flag=$FLAG_VALUE" >> $GITHUB_OUTPUT
+          else
+            echo "result=rejected" >> $GITHUB_OUTPUT
+            echo "reason=Flag hash does not match. Double-check the flag value in your writeup." \
+              >> $GITHUB_OUTPUT
+          fi
+
+      # -----------------------------------------------------------------------
+      # STEP 8 — Post an automatic comment on the PR with the result
+      # -----------------------------------------------------------------------
+      - name: Post result comment on PR
+        if: steps.detect.outputs.is_exploit_pr == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const result  = '${{ steps.verify.outputs.result }}';
+            const machine = '${{ steps.detect.outputs.machine }}';
+            const reason  = `${{ steps.verify.outputs.reason }}`;
+
+            const validated = result === 'validated';
+
+            const body = validated
+              ? `## 🐝 BtoP — PWN Validation: ✅ ACCEPTED
+
+            **Machine:** \`${machine}\`
+
+            Your exploit ran successfully and the flag hash matches.
+            A maintainer will review your writeup and merge this PR.
+
+            > 🩸 If this is the first validated pwn on this machine, you earn the **First Blood** badge.
+            > Your \`exploit.py\` is now locked — it will be the regression test for all future patches.`
+
+              : `## 🐝 BtoP — PWN Validation: ❌ REJECTED
+
+            **Machine:** \`${machine}\`
+
+            **Reason:** ${reason}
+
+            **Common fixes:**
+            - Make sure your script works with \`TARGET_IP=localhost TARGET_PORT=80\`
+            - Your script must print \`FLAG_OBTAINED:FLAG{...}\` to stdout and exit with code \`0\`
+            - Verify the flag hash: \`echo -n "FLAG{...}" | sha256sum\`
+
+            See the [Red Team Guide](../docs/GUIDE_REDTEAM.md) for the exploit format specification.`;
+
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner:        context.repo.owner,
+              repo:         context.repo.repo,
+              body
+            });
+
+      # -----------------------------------------------------------------------
+      # STEP 9 — Always clean up Docker services, even if the workflow failed
+      # -----------------------------------------------------------------------
+      - name: Stop Docker services
+        if: always() && steps.detect.outputs.is_exploit_pr == 'true'
+        run: |
+          MACHINE="${{ steps.detect.outputs.machine }}"
+          docker compose -f "${MACHINE}/ci/docker-compose.yml" down --volumes 2>/dev/null || true
