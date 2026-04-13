@@ -33,8 +33,11 @@ See the [Red Team Guide](../../docs/GUIDE_REDTEAM.md) for setup instructions.
 To validate your pwn, you must submit a Pull Request containing:
 
 1. `writeups/attack/YOUR_GITHUB_USERNAME.md` — a Markdown writeup explaining your approach.
-2. `exploit/exploit.py` — a Python script following the [standard exploit format](../../docs/GUIDE_REDTEAM.md#exploit-format).
+2. `exploit/exploit.py` — a Python script **written by you** that exploits the vulnerability and retrieves the flag. This file does not exist yet — you are the one who creates it. It must follow the [standard exploit format](../../docs/GUIDE_REDTEAM.md#exploit-format).
 3. The raw flag value (in your writeup) — anyone can verify it against the hash below.
+
+> **Note:** The exploit script you submit becomes the automated regression test for all future Blue Team patches.
+> Once your pwn is validated and merged, your script is locked — it will be replayed automatically against every patch PR.
 
 **Flag Hash (SHA-256)**:
 ```
