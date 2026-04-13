@@ -1,0 +1,19 @@
+# ci/docker-compose.yml — For GitHub Actions CI use only
+# ========================================================
+# This file is NOT for local testing by players or Blue Teamers.
+# Players use Vagrant + VirtualBox to run the full VM locally.
+#
+# This compose file pulls the pre-built CI image from the private
+# GitHub Container Registry. It has the flag baked in, so no
+# Vagrant or Ansible provisioning is needed.
+#
+# The image is built automatically by:
+#   btop-sources/machines-sources/.github/workflows/build-and-push.yml
+
+services:
+  apache:
+    image: ghcr.io/btop-sources/bee-path-ci:latest
+    container_name: bee-path-ci
+    ports:
+      - "80:80"
+    restart: unless-stopped

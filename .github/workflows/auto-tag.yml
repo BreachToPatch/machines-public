@@ -1,0 +1,111 @@
+name: Auto Tag on Merge
+
+# Triggers every time a PR is merged into main.
+# Detects which machine was updated and creates a new version tag.
+#
+# Tag format: {machine-name}/v{N+1}
+# Examples:
+#   vuln-apache-path-traversal/v1.0  ← initial release
+#   vuln-apache-path-traversal/v1.1  ← after first patch
+#   vuln-apache-path-traversal/v1.2  ← after second patch
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+
+permissions:
+  contents: write   # required to create tags
+
+jobs:
+  auto-tag:
+    name: Create version tag
+    runs-on: ubuntu-latest
+    # Only run when the PR was actually merged (not just closed/rejected)
+    if: github.event.pull_request.merged == true
+
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # needed to read existing tags
+
+      # -----------------------------------------------------------------------
+      # Detect which machine was affected by this merged PR
+      # -----------------------------------------------------------------------
+      - name: Detect affected machine
+        id: detect
+        run: |
+          # Get the list of files changed in the merged PR
+          CHANGED=$(git diff --name-only \
+            ${{ github.event.pull_request.base.sha }} \
+            ${{ github.event.pull_request.head.sha }})
+
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          # Extract the machine name from the first changed file
+          MACHINE=$(echo "$CHANGED" | grep -E '^[^/]+/' | head -1 | cut -d'/' -f1)
+
+          if [ -z "$MACHINE" ] || [ "$MACHINE" = ".github" ]; then
+            echo "No machine folder affected — skipping auto-tag."
+            echo "should_tag=false" >> $GITHUB_OUTPUT
+          else
+            echo "machine=$MACHINE" >> $GITHUB_OUTPUT
+            echo "should_tag=true" >> $GITHUB_OUTPUT
+            echo "Affected machine: $MACHINE"
+          fi
+
+      # -----------------------------------------------------------------------
+      # Find the latest existing tag for this machine and increment it
+      # If no tag exists yet, start at v1.0
+      # -----------------------------------------------------------------------
+      - name: Calculate next version
+        if: steps.detect.outputs.should_tag == 'true'
+        id: version
+        run: |
+          MACHINE="${{ steps.detect.outputs.machine }}"
+
+          # List all existing tags for this machine, sorted by version number
+          LATEST=$(git tag --list "${MACHINE}/v*" \
+            | sort -t'v' -k2 -V \
+            | tail -1)
+
+          echo "Latest tag: ${LATEST:-none}"
+
+          if [ -z "$LATEST" ]; then
+            # No tag exists yet — this is the initial release
+            NEXT="${MACHINE}/v1.0"
+          else
+            # Extract the version number and increment the minor version
+            CURRENT_VERSION=$(echo "$LATEST" | sed "s|${MACHINE}/v||")
+            MAJOR=$(echo "$CURRENT_VERSION" | cut -d'.' -f1)
+            MINOR=$(echo "$CURRENT_VERSION" | cut -d'.' -f2)
+            NEXT_MINOR=$((MINOR + 1))
+            NEXT="${MACHINE}/v${MAJOR}.${NEXT_MINOR}"
+          fi
+
+          echo "next_tag=$NEXT" >> $GITHUB_OUTPUT
+          echo "Next tag: $NEXT"
+
+      # -----------------------------------------------------------------------
+      # Create and push the new tag
+      # The tag message includes the PR title for context
+      # -----------------------------------------------------------------------
+      - name: Create and push tag
+        if: steps.detect.outputs.should_tag == 'true'
+        run: |
+          NEXT_TAG="${{ steps.version.outputs.next_tag }}"
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git tag -a "$NEXT_TAG" \
+            -m "Release $NEXT_TAG — PR #${PR_NUMBER}: ${PR_TITLE}"
+
+          git push origin "$NEXT_TAG"
+
+          echo "Created tag: $NEXT_TAG"
