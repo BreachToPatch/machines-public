@@ -36,8 +36,14 @@ To validate your pwn, you must submit a Pull Request containing:
 2. `exploit/exploit.py` — a Python script **written by you** that exploits the vulnerability and retrieves the flag. This file does not exist yet — you are the one who creates it. It must follow the [standard exploit format](../../docs/GUIDE_REDTEAM.md#exploit-format).
 3. The raw flag value (in your writeup) — anyone can verify it against the hash below.
 
-> **Note:** The exploit script you submit becomes the automated regression test for all future Blue Team patches.
-> Once your pwn is validated and merged, your script is locked — it will be replayed automatically against every patch PR.
+> **How the CI validates your pwn:** When you open a PR, GitHub Actions automatically starts
+> the machine's Docker services and runs your exploit script against them
+> (`TARGET_IP=localhost`). If your script returns exit code `0` and the flag hash matches,
+> your pwn is confirmed.
+
+> **Note:** The exploit script you submit becomes the automated regression test for all future
+> Blue Team patches. Once your pwn is validated and merged, your script is locked — it will be
+> replayed automatically against every patch PR.
 
 **Flag Hash (SHA-256)**:
 ```
