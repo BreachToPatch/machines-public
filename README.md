@@ -24,13 +24,17 @@ machines-public/
     ├── CHANGELOG.md                        # Version history (v1.0, v1.1 after patches, etc.)
     ├── writeups/
     │   ├── attack/                         # Red Team writeups (one .md file per player)
-    │   │   └── player-username.md
+    │   │   └── .gitkeep                    # Empty until first pwn is submitted
     │   └── remediation/                    # Blue Team patch writeups
-    │       └── player-username.md
+    │       └── .gitkeep                    # Empty until first patch is submitted
     └── exploit/
-        └── exploit.py                      # Validated exploit script (submitted by Red Teamer)
+        └── .gitkeep                        # Empty until first Red Teamer submits their exploit
 ```
 
+> **Note on `exploit/exploit.py`:** This file does **not** exist when a machine is first published.
+> It is submitted by the **first Red Teamer** who successfully pwns the machine, as part of their PR.
+> Once merged, it becomes the automated regression test that validates all future Blue Team patches.
+ 
 ---
 
 ## The two phases of a machine
@@ -40,10 +44,11 @@ machines-public/
 - Players download the Vagrant box and try to pwn it
 - To claim a pwn, a player opens a PR containing:
   - A writeup in `writeups/attack/their-username.md`
-  - An exploit script in `exploit/exploit.py`
+  - An exploit script in `exploit/exploit.py` — **written by the player**, not provided in advance
   - The raw flag value (written in the writeup)
-- The CI pipeline automatically boots the machine, runs the exploit, and verifies the flag hash
+- The CI pipeline automatically boots the machine, runs the submitted exploit, and verifies the flag hash
 - The **first** validated pwn earns the **First Blood** badge and unlocks the Blue Team phase
+- From that point on, `exploit/exploit.py` is locked — no further changes are accepted
 
 ### 🔵 Blue Team Phase
 - Once a machine is pwned, it enters **Blue Team Active** status
@@ -53,9 +58,53 @@ machines-public/
   - The modified source files (in a linked PR to `machines-archive`)
 - The CI pipeline verifies:
   1. All services still respond (SLA — the patch didn't break anything)
-  2. The original exploit **fails** on the patched version (the vulnerability is fixed)
+  2. The `exploit/exploit.py` submitted by the Red Teamer **fails** on the patched version (exit code `1`)
   3. No new secrets or backdoors were introduced (TruffleHog + Semgrep scan)
 - A validated patch becomes the new version of the machine (v1.1, v1.2, ...) and resets to Red Team Active
+- When a new Red Team phase begins, `exploit/exploit.py` is removed — a new Red Teamer must submit a new one
+
+---
+ 
+## The exploit script — what it is and who writes it
+ 
+The `exploit/exploit.py` file is **the proof of pwn**. It is written entirely by the Red Teamer who cracks the machine.
+ 
+It must follow the standard BtoP interface:
+ 
+```python
+#!/usr/bin/env python3
+import sys, os
+ 
+TARGET = os.environ.get("TARGET_IP", "192.168.56.10")
+PORT   = os.environ.get("TARGET_PORT", "80")
+ 
+def exploit() -> str:
+    # Must return the flag string on success
+    # Must raise AssertionError if the vulnerability is absent (patched)
+    pass
+ 
+if __name__ == "__main__":
+    try:
+        flag = exploit()
+        print(f"FLAG_OBTAINED:{flag}")
+        sys.exit(0)    # vulnerability present and exploitable
+    except AssertionError as e:
+        print(f"EXPLOIT_FAILED:{e}", file=sys.stderr)
+        sys.exit(1)    # vulnerability neutralized (patch worked)
+    except Exception as e:
+        print(f"EXPLOIT_ERROR:{e}", file=sys.stderr)
+        sys.exit(2)    # service down or network error (SLA violation)
+```
+ 
+Exit code interpretation by the CI:
+ 
+| Exit code | During pwn validation | During patch validation |
+|-----------|----------------------|------------------------|
+| `0`       | ✅ Flag verified — pwn accepted | ❌ Patch insufficient — PR rejected |
+| `1`       | ❌ Exploit failed — pwn rejected | ✅ Vulnerability fixed — patch accepted |
+| `2`       | ❌ Service unreachable | ❌ SLA violation — PR rejected |
+ 
+See the [Red Team Guide](../docs/GUIDE_REDTEAM.md) for the full exploit script template and submission instructions.
 
 ---
 
@@ -65,13 +114,13 @@ machines-public/
 1. Read the machine's `README.md` for download instructions
 2. Install [Vagrant](https://www.vagrantup.com/) and [VirtualBox](https://www.virtualbox.org/)
 3. Follow the [Red Team Guide](../docs/GUIDE_REDTEAM.md)
-4. Submit your writeup + exploit via Pull Request
+4. Submit your writeup **and your exploit script** via Pull Request
 
 ### As a Blue Teamer
 1. Wait for a machine to enter Blue Team phase (status changes in the README)
 2. Find the machine's source code in `machines-archive`
 3. Follow the [Blue Team Guide](../docs/GUIDE_BLUETEAM.md)
-4. Submit your patch via Pull Request
+4. Submit your patch via Pull Request — the CI will run the Red Teamer's exploit against your patch automatically
 
 ---
 
