@@ -41,12 +41,12 @@ machines-public/
 
 ### 🔴 Red Team Phase
 - The machine is listed with status **Red Team Active**
-- Players download the Vagrant box and try to pwn it
+- Players download the Vagrant box and try to pwn it locally (Vagrant + VirtualBox)
 - To claim a pwn, a player opens a PR containing:
   - A writeup in `writeups/attack/their-username.md`
   - An exploit script in `exploit/exploit.py` — **written by the player**, not provided in advance
   - The raw flag value (written in the writeup)
-- The CI pipeline automatically boots the machine, runs the submitted exploit, and verifies the flag hash
+- The CI pipeline starts the machine's Docker services directly and runs the submitted exploit against them, then verifies the flag hash
 - The **first** validated pwn earns the **First Blood** badge and unlocks the Blue Team phase
 - From that point on, `exploit/exploit.py` is locked — no further changes are accepted
 
@@ -57,11 +57,26 @@ machines-public/
   - A patch description in `writeups/remediation/their-username.md`
   - The modified source files (in a linked PR to `machines-archive`)
 - The CI pipeline verifies:
-  1. All services still respond (SLA — the patch didn't break anything)
+  1. All services still respond after starting with Docker Compose (SLA — the patch didn't break anything)
   2. The `exploit/exploit.py` submitted by the Red Teamer **fails** on the patched version (exit code `1`)
   3. No new secrets or backdoors were introduced (TruffleHog + Semgrep scan)
 - A validated patch becomes the new version of the machine (v1.1, v1.2, ...) and resets to Red Team Active
 - When a new Red Team phase begins, `exploit/exploit.py` is removed — a new Red Teamer must submit a new one
+
+---
+
+## How the CI works (no VM needed)
+
+Players run machines locally using **Vagrant + VirtualBox** for a realistic, fully isolated pentest environment.
+
+The CI pipeline, however, runs the **Docker Compose services directly** on GitHub's free hosted runners (Ubuntu Linux). This works because:
+- The vulnerable services (web, SSH, FTP, databases, etc.) run inside Docker containers
+- The exploit script connects to those containers exactly as it would inside a VM
+- This covers 99% of vulnerability types: web, SSH, FTP, misconfigured services, application-level privilege escalation
+
+> **Exception:** Vulnerabilities that require kernel-level exploitation or Layer 2 network attacks
+> cannot be validated this way. Such machines would require a dedicated self-hosted runner.
+> These are rare, advanced cases — out of scope for Easy and Medium difficulty machines.
 
 ---
  
@@ -131,7 +146,7 @@ machines-sources (btop-sources, private)
    └── Maintainers build and publish the Vagrant box as a GitHub Release here
 
 machines-public (this repo) ←── Players submit PRs here
-   └── CI validates pwns and patches automatically
+   └── CI validates pwns and patches automatically via Docker Compose + GitHub Actions
 
 machines-archive (BreachToPatch, public)
    └── Source code is revealed here after first pwn
