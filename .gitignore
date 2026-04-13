@@ -1,0 +1,43 @@
+# =============================================================================
+# machines-public — .gitignore
+# =============================================================================
+
+# --- Python (exploit scripts and test files) ---
+__pycache__/
+*.py[cod]
+*.pyo
+
+# --- Ansible (if maintainers run local tests) ---
+*.retry
+
+# --- Vagrant (if maintainers test locally) ---
+.vagrant/
+*.box
+
+# --- Secrets & environment files ---
+# Exploit scripts must use env vars — never hardcode secrets
+.env
+.env.*
+*.pem
+*.key
+
+# --- Logs ---
+*.log
+
+# --- OS artifacts ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*~
+
+# --- Editor / IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Temporary files ---
+*.tmp
+*.bak
+*.orig
