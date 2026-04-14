@@ -2,12 +2,17 @@ name: Validate PWN Submission
 
 # Triggers when a player opens or updates a PR adding files in writeups/attack/.
 #
+# Required branch name convention: attack/{github-username}/{machine-name}
+# Example: attack/alice/vuln-apache-path-traversal
+#
 # Expected PR structure (player submits only their own folder):
 #   writeups/attack/{github-username}/writeup.md
 #   writeups/attack/{github-username}/exploit.py
 #
-# Security: the CI verifies that the folder name matches the PR author's GitHub username.
-# A player cannot submit inside another player's folder.
+# Security checks:
+#   - Branch name must follow the convention attack/{username}/{machine}
+#   - Folder name must match the PR author's GitHub username
+#   - PR must only touch files inside the player's own folder
 #
 # On first blood: the exploit is automatically copied to exploit/exploit.py and locked.
 
@@ -34,7 +39,38 @@ jobs:
           fetch-depth: 0
 
       # -----------------------------------------------------------------------
-      # STEP 1 — Detect machine and player username from changed file paths
+      # STEP 1 — Verify branch name follows the convention
+      # Required format: attack/{username}/{machine-name}
+      # -----------------------------------------------------------------------
+      - name: Verify branch name convention
+        id: branch
+        run: |
+          BRANCH="${{ github.head_ref }}"
+          echo "Branch name: $BRANCH"
+
+          # Check format: must start with "attack/"
+          if [[ ! "$BRANCH" =~ ^attack/[^/]+/[^/]+$ ]]; then
+            echo "Invalid branch name: '$BRANCH'"
+            echo ""
+            echo "Your branch must follow this convention:"
+            echo "  attack/{your-github-username}/{machine-name}"
+            echo ""
+            echo "Examples:"
+            echo "  attack/alice/vuln-apache-path-traversal"
+            echo "  attack/bob/vuln-apache-path-traversal"
+            exit 1
+          fi
+
+          # Extract username and machine from branch name
+          BRANCH_USERNAME=$(echo "$BRANCH" | cut -d'/' -f2)
+          BRANCH_MACHINE=$(echo "$BRANCH"  | cut -d'/' -f3)
+
+          echo "branch_username=$BRANCH_USERNAME" >> $GITHUB_OUTPUT
+          echo "branch_machine=$BRANCH_MACHINE"   >> $GITHUB_OUTPUT
+          echo "Branch convention check passed — user: $BRANCH_USERNAME, machine: $BRANCH_MACHINE"
+
+      # -----------------------------------------------------------------------
+      # STEP 2 — Detect machine and player username from changed file paths
       # Expected path: {machine}/writeups/attack/{username}/exploit.py
       # -----------------------------------------------------------------------
       - name: Detect machine and player
@@ -65,28 +101,51 @@ jobs:
           echo "Machine: $MACHINE | Player: $USERNAME"
 
       # -----------------------------------------------------------------------
-      # STEP 2 — Verify the PR author matches the folder name
-      # Prevents a player from submitting inside another player's folder.
+      # STEP 3 — Cross-check branch name vs folder name vs PR author
+      # All three must be consistent:
+      #   branch: attack/{username}/{machine}
+      #   folder: {machine}/writeups/attack/{username}/
+      #   PR author: {username}
       # -----------------------------------------------------------------------
-      - name: Verify folder ownership
+      - name: Cross-check branch, folder, and PR author
         if: steps.detect.outputs.is_pwn_pr == 'true'
         run: |
           PR_AUTHOR="${{ github.event.pull_request.user.login }}"
-          FOLDER_NAME="${{ steps.detect.outputs.username }}"
+          FOLDER_USERNAME="${{ steps.detect.outputs.username }}"
+          FOLDER_MACHINE="${{ steps.detect.outputs.machine }}"
+          BRANCH_USERNAME="${{ steps.branch.outputs.branch_username }}"
+          BRANCH_MACHINE="${{ steps.branch.outputs.branch_machine }}"
+          ERRORS=""
 
-          echo "PR author:   $PR_AUTHOR"
-          echo "Folder name: $FOLDER_NAME"
+          echo "PR author:      $PR_AUTHOR"
+          echo "Folder user:    $FOLDER_USERNAME"
+          echo "Branch user:    $BRANCH_USERNAME"
+          echo "Folder machine: $FOLDER_MACHINE"
+          echo "Branch machine: $BRANCH_MACHINE"
 
-          if [ "$PR_AUTHOR" != "$FOLDER_NAME" ]; then
-            echo "Ownership mismatch: @${PR_AUTHOR} tried to submit in folder '${FOLDER_NAME}'."
-            echo "Your folder must be named exactly after your GitHub username."
+          if [ "$PR_AUTHOR" != "$FOLDER_USERNAME" ]; then
+            ERRORS="${ERRORS}\n- PR author (@${PR_AUTHOR}) does not match folder name (${FOLDER_USERNAME})."
+          fi
+
+          if [ "$PR_AUTHOR" != "$BRANCH_USERNAME" ]; then
+            ERRORS="${ERRORS}\n- PR author (@${PR_AUTHOR}) does not match branch username (${BRANCH_USERNAME})."
+          fi
+
+          if [ "$FOLDER_MACHINE" != "$BRANCH_MACHINE" ]; then
+            ERRORS="${ERRORS}\n- Machine in folder (${FOLDER_MACHINE}) does not match machine in branch (${BRANCH_MACHINE})."
+          fi
+
+          if [ -n "$ERRORS" ]; then
+            echo -e "Consistency check failed:${ERRORS}"
+            echo ""
+            echo "Make sure your branch is named: attack/${PR_AUTHOR}/${FOLDER_MACHINE}"
             exit 1
           fi
 
-          echo "Ownership check passed."
+          echo "All consistency checks passed."
 
       # -----------------------------------------------------------------------
-      # STEP 3 — Check that both required files are present
+      # STEP 4 — Check that both required files are present
       # -----------------------------------------------------------------------
       - name: Check required files
         if: steps.detect.outputs.is_pwn_pr == 'true'
@@ -110,7 +169,7 @@ jobs:
           echo "All required files present."
 
       # -----------------------------------------------------------------------
-      # STEP 4 — Verify the PR only touches the player's own folder
+      # STEP 5 — Verify the PR only touches the player's own folder
       # Rejects PRs that modify files outside writeups/attack/{username}/
       # -----------------------------------------------------------------------
       - name: Verify PR scope
@@ -134,7 +193,7 @@ jobs:
           echo "Scope check passed — all changes are within the allowed folder."
 
       # -----------------------------------------------------------------------
-      # STEP 5 — Extract expected flag hash from the machine's public README
+      # STEP 6 — Extract expected flag hash from the machine's public README
       # -----------------------------------------------------------------------
       - name: Extract expected flag hash
         if: steps.detect.outputs.is_pwn_pr == 'true'
@@ -152,7 +211,7 @@ jobs:
           echo "Expected hash: $FLAG_HASH"
 
       # -----------------------------------------------------------------------
-      # STEP 6 — Check first blood status
+      # STEP 7 — Check first blood status
       # -----------------------------------------------------------------------
       - name: Check first blood status
         if: steps.detect.outputs.is_pwn_pr == 'true'
@@ -169,7 +228,7 @@ jobs:
           fi
 
       # -----------------------------------------------------------------------
-      # STEP 7 — Pull the private CI image and start the vulnerable services
+      # STEP 8 — Pull the private CI image and start the vulnerable services
       # -----------------------------------------------------------------------
       - name: Log in to GitHub Container Registry
         if: steps.detect.outputs.is_pwn_pr == 'true'
@@ -207,7 +266,7 @@ jobs:
           fi
 
       # -----------------------------------------------------------------------
-      # STEP 8 — Run the player's exploit script
+      # STEP 9 — Run the player's exploit script
       # -----------------------------------------------------------------------
       - name: Run exploit script
         if: steps.detect.outputs.is_pwn_pr == 'true'
@@ -234,7 +293,7 @@ jobs:
           } >> $GITHUB_OUTPUT
 
       # -----------------------------------------------------------------------
-      # STEP 9 — Verify the flag hash
+      # STEP 10 — Verify the flag hash
       # -----------------------------------------------------------------------
       - name: Verify flag hash
         if: steps.detect.outputs.is_pwn_pr == 'true'
@@ -277,7 +336,7 @@ jobs:
           fi
 
       # -----------------------------------------------------------------------
-      # STEP 10 — On first blood: copy exploit to exploit/exploit.py and lock it
+      # STEP 11 — On first blood: copy exploit to exploit/exploit.py and lock it
       # -----------------------------------------------------------------------
       - name: Lock exploit on first blood
         if: |
@@ -306,7 +365,7 @@ jobs:
           echo "Exploit locked at ${MACHINE}/exploit/exploit.py"
 
       # -----------------------------------------------------------------------
-      # STEP 11 — Post result comment on the PR
+      # STEP 12 — Post result comment on the PR
       # -----------------------------------------------------------------------
       - name: Post result comment on PR
         if: steps.detect.outputs.is_pwn_pr == 'true'
@@ -343,12 +402,12 @@ jobs:
             **Reason:** ${reason}
 
             **Common fixes:**
+            - Branch must be named \`attack/${username}/${machine}\`
             - Make sure your script works with \`TARGET_IP=localhost TARGET_PORT=80\`
             - Your script must print \`FLAG_OBTAINED:FLAG{...}\` to stdout and exit with code \`0\`
             - Verify the flag hash: \`echo -n "FLAG{...}" | sha256sum\`
-            - Your folder name must exactly match your GitHub username
 
-            See the [Red Team Guide](../docs/GUIDE_REDTEAM.md) for the exploit format specification.`;
+            See the [Red Team Guide](../docs/GUIDE_REDTEAM.md) for full instructions.`;
             }
 
             await github.rest.issues.createComment({
@@ -359,7 +418,7 @@ jobs:
             });
 
       # -----------------------------------------------------------------------
-      # STEP 12 — Always clean up Docker services
+      # STEP 13 — Always clean up Docker services
       # -----------------------------------------------------------------------
       - name: Stop Docker services
         if: always() && steps.detect.outputs.is_pwn_pr == 'true'

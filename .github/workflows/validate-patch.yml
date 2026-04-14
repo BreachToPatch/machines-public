@@ -2,12 +2,18 @@ name: Validate Patch Submission
 
 # Triggers when a Blue Teamer opens a PR adding files in writeups/patch/.
 #
+# Required branch name convention: patch/{github-username}/{machine-name}
+# Example: patch/alice/vuln-apache-path-traversal
+#
 # Expected PR structure (player submits only their own folder):
 #   writeups/patch/{github-username}/writeup.md
 #   writeups/patch/{github-username}/docker-compose.yml
 #   writeups/patch/{github-username}/<any other patched files>
 #
-# Security: the CI verifies that the folder name matches the PR author's GitHub username.
+# Security checks:
+#   - Branch name must follow the convention patch/{username}/{machine}
+#   - Folder name must match the PR author's GitHub username
+#   - PR must only touch files inside the player's own folder
 
 on:
   pull_request:
@@ -31,8 +37,37 @@ jobs:
           fetch-depth: 0
 
       # -----------------------------------------------------------------------
-      # STEP 1 — Detect machine and patch author
-      # Expected path: {machine}/writeups/patch/{username}/docker-compose.yml
+      # STEP 1 — Verify branch name follows the convention
+      # Required format: patch/{username}/{machine-name}
+      # -----------------------------------------------------------------------
+      - name: Verify branch name convention
+        id: branch
+        run: |
+          BRANCH="${{ github.head_ref }}"
+          echo "Branch name: $BRANCH"
+
+          if [[ ! "$BRANCH" =~ ^patch/[^/]+/[^/]+$ ]]; then
+            echo "Invalid branch name: '$BRANCH'"
+            echo ""
+            echo "Your branch must follow this convention:"
+            echo "  patch/{your-github-username}/{machine-name}"
+            echo ""
+            echo "Examples:"
+            echo "  patch/alice/vuln-apache-path-traversal"
+            echo "  patch/bob/vuln-apache-path-traversal"
+            exit 1
+          fi
+
+          BRANCH_USERNAME=$(echo "$BRANCH" | cut -d'/' -f2)
+          BRANCH_MACHINE=$(echo "$BRANCH"  | cut -d'/' -f3)
+
+          echo "branch_username=$BRANCH_USERNAME" >> $GITHUB_OUTPUT
+          echo "branch_machine=$BRANCH_MACHINE"   >> $GITHUB_OUTPUT
+          echo "Branch convention check passed — user: $BRANCH_USERNAME, machine: $BRANCH_MACHINE"
+
+      # -----------------------------------------------------------------------
+      # STEP 2 — Detect machine and patch author from changed file paths
+      # Expected path: {machine}/writeups/patch/{username}/
       # -----------------------------------------------------------------------
       - name: Detect machine and patch author
         id: detect
@@ -62,47 +97,44 @@ jobs:
           echo "Machine: $MACHINE | Patch author: $USERNAME"
 
       # -----------------------------------------------------------------------
-      # STEP 2 — Verify folder ownership
+      # STEP 3 — Cross-check branch name vs folder name vs PR author
       # -----------------------------------------------------------------------
-      - name: Verify folder ownership
+      - name: Cross-check branch, folder, and PR author
         if: steps.detect.outputs.is_patch_pr == 'true'
         run: |
           PR_AUTHOR="${{ github.event.pull_request.user.login }}"
-          FOLDER_NAME="${{ steps.detect.outputs.username }}"
+          FOLDER_USERNAME="${{ steps.detect.outputs.username }}"
+          FOLDER_MACHINE="${{ steps.detect.outputs.machine }}"
+          BRANCH_USERNAME="${{ steps.branch.outputs.branch_username }}"
+          BRANCH_MACHINE="${{ steps.branch.outputs.branch_machine }}"
+          ERRORS=""
 
-          echo "PR author:   $PR_AUTHOR"
-          echo "Folder name: $FOLDER_NAME"
+          echo "PR author:      $PR_AUTHOR"
+          echo "Folder user:    $FOLDER_USERNAME"
+          echo "Branch user:    $BRANCH_USERNAME"
+          echo "Folder machine: $FOLDER_MACHINE"
+          echo "Branch machine: $BRANCH_MACHINE"
 
-          if [ "$PR_AUTHOR" != "$FOLDER_NAME" ]; then
-            echo "Ownership mismatch: @${PR_AUTHOR} tried to submit in folder '${FOLDER_NAME}'."
-            echo "Your folder must be named exactly after your GitHub username."
-            exit 1
+          if [ "$PR_AUTHOR" != "$FOLDER_USERNAME" ]; then
+            ERRORS="${ERRORS}\n- PR author (@${PR_AUTHOR}) does not match folder name (${FOLDER_USERNAME})."
           fi
 
-          echo "Ownership check passed."
+          if [ "$PR_AUTHOR" != "$BRANCH_USERNAME" ]; then
+            ERRORS="${ERRORS}\n- PR author (@${PR_AUTHOR}) does not match branch username (${BRANCH_USERNAME})."
+          fi
 
-      # -----------------------------------------------------------------------
-      # STEP 3 — Verify the PR only touches the player's own folder
-      # -----------------------------------------------------------------------
-      - name: Verify PR scope
-        if: steps.detect.outputs.is_patch_pr == 'true'
-        run: |
-          MACHINE="${{ steps.detect.outputs.machine }}"
-          USERNAME="${{ steps.detect.outputs.username }}"
-          ALLOWED_PREFIX="${MACHINE}/writeups/patch/${USERNAME}/"
+          if [ "$FOLDER_MACHINE" != "$BRANCH_MACHINE" ]; then
+            ERRORS="${ERRORS}\n- Machine in folder (${FOLDER_MACHINE}) does not match machine in branch (${BRANCH_MACHINE})."
+          fi
 
-          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
-          VIOLATIONS=$(echo "$CHANGED" | grep -v "^${ALLOWED_PREFIX}" || true)
-
-          if [ -n "$VIOLATIONS" ]; then
-            echo "PR touches files outside your allowed folder:"
-            echo "$VIOLATIONS"
+          if [ -n "$ERRORS" ]; then
+            echo -e "Consistency check failed:${ERRORS}"
             echo ""
-            echo "Your PR must only add files inside: ${ALLOWED_PREFIX}"
+            echo "Make sure your branch is named: patch/${PR_AUTHOR}/${FOLDER_MACHINE}"
             exit 1
           fi
 
-          echo "Scope check passed."
+          echo "All consistency checks passed."
 
       # -----------------------------------------------------------------------
       # STEP 4 — Check that all required files are present
@@ -136,7 +168,30 @@ jobs:
           echo "All required files present."
 
       # -----------------------------------------------------------------------
-      # STEP 5 — Scan the patch for accidentally committed secrets
+      # STEP 5 — Verify the PR only touches the player's own folder
+      # -----------------------------------------------------------------------
+      - name: Verify PR scope
+        if: steps.detect.outputs.is_patch_pr == 'true'
+        run: |
+          MACHINE="${{ steps.detect.outputs.machine }}"
+          USERNAME="${{ steps.detect.outputs.username }}"
+          ALLOWED_PREFIX="${MACHINE}/writeups/patch/${USERNAME}/"
+
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          VIOLATIONS=$(echo "$CHANGED" | grep -v "^${ALLOWED_PREFIX}" || true)
+
+          if [ -n "$VIOLATIONS" ]; then
+            echo "PR touches files outside your allowed folder:"
+            echo "$VIOLATIONS"
+            echo ""
+            echo "Your PR must only add files inside: ${ALLOWED_PREFIX}"
+            exit 1
+          fi
+
+          echo "Scope check passed."
+
+      # -----------------------------------------------------------------------
+      # STEP 6 — Scan the patch for accidentally committed secrets
       # -----------------------------------------------------------------------
       - name: Scan patch for secrets
         if: steps.detect.outputs.is_patch_pr == 'true'
@@ -156,7 +211,7 @@ jobs:
           exit 1
 
       # -----------------------------------------------------------------------
-      # STEP 6 — Build and start the patched Docker services
+      # STEP 7 — Build and start the patched Docker services
       # The patch files live in writeups/patch/{username}/
       # The flag is injected via secret for the regression test.
       # -----------------------------------------------------------------------
@@ -195,7 +250,7 @@ jobs:
           fi
 
       # -----------------------------------------------------------------------
-      # STEP 7 — SLA health check
+      # STEP 8 — SLA health check
       # -----------------------------------------------------------------------
       - name: SLA health check
         if: steps.detect.outputs.is_patch_pr == 'true'
@@ -216,7 +271,7 @@ jobs:
           echo "SLA check passed."
 
       # -----------------------------------------------------------------------
-      # STEP 8 — Replay the locked exploit against the patched version
+      # STEP 9 — Replay the locked exploit against the patched version
       # Exit 1 = good (vulnerability fixed)
       # Exit 0 = bad (patch insufficient)
       # Exit 2 = bad (SLA violation)
@@ -244,7 +299,7 @@ jobs:
           esac
 
       # -----------------------------------------------------------------------
-      # STEP 9 — Post result comment on the PR
+      # STEP 10 — Post result comment on the PR
       # -----------------------------------------------------------------------
       - name: Post result comment on PR
         if: steps.detect.outputs.is_patch_pr == 'true'
@@ -294,7 +349,7 @@ jobs:
             });
 
       # -----------------------------------------------------------------------
-      # STEP 10 — Always clean up
+      # STEP 11 — Always clean up
       # -----------------------------------------------------------------------
       - name: Stop Docker services
         if: always() && steps.detect.outputs.is_patch_pr == 'true'
