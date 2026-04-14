@@ -1,23 +1,19 @@
 name: Validate Patch Submission
 
-# Triggers when a Blue Teamer opens a PR with a patch.
-# A patch PR must contain:
-#   - writeups/remediation/their-username.md
-#   - patches/their-username/ folder with the modified app files
+# Triggers when a Blue Teamer opens a PR adding files in writeups/patch/.
 #
-# This workflow:
-#   1. Builds a Docker image from the patched files
-#   2. Verifies all services still respond (SLA check)
-#   3. Replays the Red Teamer's exploit — it MUST fail (exit code 1)
-#   4. Scans for new secrets accidentally introduced in the patch
-#   5. Posts an automatic comment on the PR with the result
+# Expected PR structure (player submits only their own folder):
+#   writeups/patch/{github-username}/writeup.md
+#   writeups/patch/{github-username}/docker-compose.yml
+#   writeups/patch/{github-username}/<any other patched files>
+#
+# Security: the CI verifies that the folder name matches the PR author's GitHub username.
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
-      - '*/patches/**'
-      - '*/writeups/remediation/*.md'
+      - '*/writeups/patch/**'
 
 permissions:
   pull-requests: write
@@ -29,19 +25,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # -----------------------------------------------------------------------
-      # STEP 1 — Get the code from the PR branch
-      # -----------------------------------------------------------------------
       - name: Checkout PR branch
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       # -----------------------------------------------------------------------
-      # STEP 2 — Detect which machine is being patched
-      # Looks for paths matching: {machine}/patches/{username}/
+      # STEP 1 — Detect machine and patch author
+      # Expected path: {machine}/writeups/patch/{username}/docker-compose.yml
       # -----------------------------------------------------------------------
-      - name: Detect target machine and patch author
+      - name: Detect machine and patch author
         id: detect
         run: |
           CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
@@ -49,56 +42,90 @@ jobs:
           echo "$CHANGED"
 
           PATCH_PATH=$(echo "$CHANGED" \
-            | grep -E '^[^/]+/patches/[^/]+/' \
+            | grep -E '^[^/]+/writeups/patch/[^/]+/' \
             | head -1)
 
           if [ -z "$PATCH_PATH" ]; then
             echo "is_patch_pr=false" >> $GITHUB_OUTPUT
-            echo "No patch files detected — skipping patch validation."
+            echo "No patch files detected — skipping."
             exit 0
           fi
 
-          MACHINE=$(echo "$PATCH_PATH" | cut -d'/' -f1)
-          AUTHOR=$(echo "$PATCH_PATH" | cut -d'/' -f3)
+          MACHINE=$(echo "$PATCH_PATH"  | cut -d'/' -f1)
+          USERNAME=$(echo "$PATCH_PATH" | cut -d'/' -f4)
+          PATCH_DIR="${MACHINE}/writeups/patch/${USERNAME}"
 
-          echo "machine=$MACHINE" >> $GITHUB_OUTPUT
-          echo "author=$AUTHOR" >> $GITHUB_OUTPUT
-          echo "patch_dir=${MACHINE}/patches/${AUTHOR}" >> $GITHUB_OUTPUT
-          echo "is_patch_pr=true" >> $GITHUB_OUTPUT
-          echo "Target machine: $MACHINE | Patch author: $AUTHOR"
+          echo "machine=$MACHINE"     >> $GITHUB_OUTPUT
+          echo "username=$USERNAME"   >> $GITHUB_OUTPUT
+          echo "patch_dir=$PATCH_DIR" >> $GITHUB_OUTPUT
+          echo "is_patch_pr=true"     >> $GITHUB_OUTPUT
+          echo "Machine: $MACHINE | Patch author: $USERNAME"
 
       # -----------------------------------------------------------------------
-      # STEP 3 — Check that all required files are present
-      # A valid patch PR must contain: a remediation writeup AND patch files
-      # AND the machine must already have a locked exploit.py from a Red Teamer
+      # STEP 2 — Verify folder ownership
+      # -----------------------------------------------------------------------
+      - name: Verify folder ownership
+        if: steps.detect.outputs.is_patch_pr == 'true'
+        run: |
+          PR_AUTHOR="${{ github.event.pull_request.user.login }}"
+          FOLDER_NAME="${{ steps.detect.outputs.username }}"
+
+          echo "PR author:   $PR_AUTHOR"
+          echo "Folder name: $FOLDER_NAME"
+
+          if [ "$PR_AUTHOR" != "$FOLDER_NAME" ]; then
+            echo "Ownership mismatch: @${PR_AUTHOR} tried to submit in folder '${FOLDER_NAME}'."
+            echo "Your folder must be named exactly after your GitHub username."
+            exit 1
+          fi
+
+          echo "Ownership check passed."
+
+      # -----------------------------------------------------------------------
+      # STEP 3 — Verify the PR only touches the player's own folder
+      # -----------------------------------------------------------------------
+      - name: Verify PR scope
+        if: steps.detect.outputs.is_patch_pr == 'true'
+        run: |
+          MACHINE="${{ steps.detect.outputs.machine }}"
+          USERNAME="${{ steps.detect.outputs.username }}"
+          ALLOWED_PREFIX="${MACHINE}/writeups/patch/${USERNAME}/"
+
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          VIOLATIONS=$(echo "$CHANGED" | grep -v "^${ALLOWED_PREFIX}" || true)
+
+          if [ -n "$VIOLATIONS" ]; then
+            echo "PR touches files outside your allowed folder:"
+            echo "$VIOLATIONS"
+            echo ""
+            echo "Your PR must only add files inside: ${ALLOWED_PREFIX}"
+            exit 1
+          fi
+
+          echo "Scope check passed."
+
+      # -----------------------------------------------------------------------
+      # STEP 4 — Check that all required files are present
       # -----------------------------------------------------------------------
       - name: Check required files
         if: steps.detect.outputs.is_patch_pr == 'true'
         run: |
           MACHINE="${{ steps.detect.outputs.machine }}"
-          AUTHOR="${{ steps.detect.outputs.author }}"
           PATCH_DIR="${{ steps.detect.outputs.patch_dir }}"
           ERRORS=""
 
-          # Check remediation writeup
-          if [ ! -f "${MACHINE}/writeups/remediation/${AUTHOR}.md" ]; then
-            ERRORS="${ERRORS}\n- Missing: \`${MACHINE}/writeups/remediation/${AUTHOR}.md\`"
+          if [ ! -f "${PATCH_DIR}/writeup.md" ]; then
+            ERRORS="${ERRORS}\n- Missing: \`${PATCH_DIR}/writeup.md\`"
           fi
 
-          # Check patch files exist
-          if [ ! -d "${PATCH_DIR}" ]; then
-            ERRORS="${ERRORS}\n- Missing: patch folder at \`${PATCH_DIR}/\`"
-          fi
-
-          # Check docker-compose.yml is in the patch
           if [ ! -f "${PATCH_DIR}/docker-compose.yml" ]; then
             ERRORS="${ERRORS}\n- Missing: \`${PATCH_DIR}/docker-compose.yml\`"
           fi
 
-          # Check the Red Teamer's exploit exists (required for regression test)
+          # The locked exploit MUST exist — machine must have been pwned first
           if [ ! -f "${MACHINE}/exploit/exploit.py" ]; then
-            ERRORS="${ERRORS}\n- Cannot validate patch: no locked \`exploit.py\` found."
-            ERRORS="${ERRORS}\n  The machine must have been pwned before patches can be submitted."
+            ERRORS="${ERRORS}\n- Cannot validate patch: no locked \`exploit/exploit.py\` found."
+            ERRORS="${ERRORS}\n  The machine must be pwned at least once before patches can be submitted."
           fi
 
           if [ -n "$ERRORS" ]; then
@@ -109,11 +136,9 @@ jobs:
           echo "All required files present."
 
       # -----------------------------------------------------------------------
-      # STEP 4 — Scan the patch for accidentally committed secrets
-      # Uses TruffleHog to detect API keys, tokens, passwords, etc.
-      # A patch that introduces new secrets is automatically rejected.
+      # STEP 5 — Scan the patch for accidentally committed secrets
       # -----------------------------------------------------------------------
-      - name: Scan patch for secrets (TruffleHog)
+      - name: Scan patch for secrets
         if: steps.detect.outputs.is_patch_pr == 'true'
         id: secrets_scan
         uses: trufflesecurity/trufflehog@main
@@ -122,53 +147,29 @@ jobs:
           base: ${{ github.event.pull_request.base.sha }}
           head: ${{ github.event.pull_request.head.sha }}
           extra_args: --only-verified
-        continue-on-error: true   # we handle the result manually below
+        continue-on-error: true
 
       - name: Fail if secrets were found
         if: steps.detect.outputs.is_patch_pr == 'true' && steps.secrets_scan.outcome == 'failure'
         run: |
-          echo "TruffleHog detected secrets in the patch files."
-          echo "secrets_found=true" >> $GITHUB_ENV
+          echo "TruffleHog detected secrets in the patch files. PR rejected."
           exit 1
 
       # -----------------------------------------------------------------------
-      # STEP 5 — Build a Docker image from the patched files
-      # The Blue Teamer's patch lives in patches/{author}/
-      # We build the image locally — no ghcr.io pull needed here.
+      # STEP 6 — Build and start the patched Docker services
+      # The patch files live in writeups/patch/{username}/
+      # The flag is injected via secret for the regression test.
       # -----------------------------------------------------------------------
-      - name: Build patched Docker image
-        if: steps.detect.outputs.is_patch_pr == 'true'
-        id: build
-        run: |
-          PATCH_DIR="${{ steps.detect.outputs.patch_dir }}"
-          MACHINE="${{ steps.detect.outputs.machine }}"
-
-          # Build using the patched docker-compose.yml
-          # The flag must be injected as a build argument so the exploit regression
-          # test can still look for it (if the patch is insufficient, the flag will
-          # still be readable and the exploit will succeed → PR rejected)
-          # The flag hash is public — the flag value itself is injected via secret.
-          FLAG_VALUE="${{ secrets.BEE_PATH_FLAG }}"
-
-          # Write the flag into a temp file the container can use during build
-          echo "$FLAG_VALUE" > /tmp/flag.txt
-
-          # Inject flag into the patched image via build arg
-          docker compose -f "${PATCH_DIR}/docker-compose.yml" build \
-            --build-arg FLAG_VALUE="$FLAG_VALUE"
-
-          echo "Patched image built successfully."
-
-      # -----------------------------------------------------------------------
-      # STEP 6 — Start the patched services
-      # -----------------------------------------------------------------------
-      - name: Start patched Docker services
+      - name: Build and start patched Docker services
         if: steps.detect.outputs.is_patch_pr == 'true'
         id: services
         env:
           FLAG_VALUE: ${{ secrets.BEE_PATH_FLAG }}
         run: |
           PATCH_DIR="${{ steps.detect.outputs.patch_dir }}"
+
+          docker compose -f "${PATCH_DIR}/docker-compose.yml" build \
+            --build-arg FLAG_VALUE="$FLAG_VALUE"
 
           docker compose -f "${PATCH_DIR}/docker-compose.yml" up -d
 
@@ -188,14 +189,13 @@ jobs:
           done
 
           if ! grep -q "status=up" "$GITHUB_OUTPUT"; then
-            echo "Service did not start after patching — SLA violation."
+            echo "Service did not start — SLA violation."
             echo "status=down" >> $GITHUB_OUTPUT
             exit 1
           fi
 
       # -----------------------------------------------------------------------
-      # STEP 7 — SLA check: all services must still respond
-      # Uses the machine's health_check script if present, falls back to curl.
+      # STEP 7 — SLA health check
       # -----------------------------------------------------------------------
       - name: SLA health check
         if: steps.detect.outputs.is_patch_pr == 'true'
@@ -203,8 +203,6 @@ jobs:
         run: |
           MACHINE="${{ steps.detect.outputs.machine }}"
 
-          # If the machine has a health_check script, run it
-          # Otherwise fall back to a basic HTTP check
           if [ -f "${MACHINE}/tests/health_check.sh" ]; then
             TARGET_IP=localhost TARGET_PORT=80 bash "${MACHINE}/tests/health_check.sh"
           else
@@ -218,11 +216,10 @@ jobs:
           echo "SLA check passed."
 
       # -----------------------------------------------------------------------
-      # STEP 8 — Replay the Red Teamer's exploit against the patched version
-      # This is the core regression test.
-      # The exploit MUST fail (exit code 1) for the patch to be accepted.
-      # If it returns 0 → patch is insufficient → PR rejected.
-      # If it returns 2 → service is down → SLA violation → PR rejected.
+      # STEP 8 — Replay the locked exploit against the patched version
+      # Exit 1 = good (vulnerability fixed)
+      # Exit 0 = bad (patch insufficient)
+      # Exit 2 = bad (SLA violation)
       # -----------------------------------------------------------------------
       - name: Run exploit regression test
         if: steps.detect.outputs.is_patch_pr == 'true'
@@ -240,26 +237,14 @@ jobs:
           echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
 
           case $EXIT_CODE in
-            0)
-              echo "result=insufficient" >> $GITHUB_OUTPUT
-              echo "Exploit succeeded on patched version — patch does not fix the vulnerability."
-              ;;
-            1)
-              echo "result=effective" >> $GITHUB_OUTPUT
-              echo "Exploit failed on patched version — vulnerability is neutralized."
-              ;;
-            2)
-              echo "result=sla_violation" >> $GITHUB_OUTPUT
-              echo "Service unreachable during exploit test — SLA violation."
-              ;;
-            *)
-              echo "result=unknown" >> $GITHUB_OUTPUT
-              echo "Unexpected exit code: $EXIT_CODE"
-              ;;
+            0) echo "result=insufficient"  >> $GITHUB_OUTPUT ;;
+            1) echo "result=effective"     >> $GITHUB_OUTPUT ;;
+            2) echo "result=sla_violation" >> $GITHUB_OUTPUT ;;
+            *) echo "result=unknown"       >> $GITHUB_OUTPUT ;;
           esac
 
       # -----------------------------------------------------------------------
-      # STEP 9 — Post an automatic comment on the PR with the full result
+      # STEP 9 — Post result comment on the PR
       # -----------------------------------------------------------------------
       - name: Post result comment on PR
         if: steps.detect.outputs.is_patch_pr == 'true'
@@ -267,7 +252,7 @@ jobs:
         with:
           script: |
             const machine    = '${{ steps.detect.outputs.machine }}';
-            const author     = '${{ steps.detect.outputs.author }}';
+            const username   = '${{ steps.detect.outputs.username }}';
             const regression = '${{ steps.regression.outputs.result }}';
             const sla        = '${{ steps.sla.outcome }}';
 
@@ -278,7 +263,7 @@ jobs:
               detail = `The exploit was successfully blocked by your patch (exit code \`1\`).
             All services are still responding (SLA check passed).
             A maintainer will review your writeup and merge this PR.
-            > This version will become \`v1.1\` of the machine and reset the Red Team phase.`;
+            > This version will become the next release of the machine and reset the Red Team phase.`;
             } else if (regression === 'insufficient') {
               status = '❌ PATCH REJECTED — Vulnerability not fixed';
               detail = `The original exploit still works on your patched version (exit code \`0\`).
@@ -297,7 +282,7 @@ jobs:
             const body = `## 🐝 BtoP — Patch Validation: ${status}
 
             **Machine:** \`${machine}\`
-            **Patch by:** @${author}
+            **Patch by:** @${username}
 
             ${detail}`;
 
@@ -309,7 +294,7 @@ jobs:
             });
 
       # -----------------------------------------------------------------------
-      # STEP 10 — Always clean up, even on failure
+      # STEP 10 — Always clean up
       # -----------------------------------------------------------------------
       - name: Stop Docker services
         if: always() && steps.detect.outputs.is_patch_pr == 'true'

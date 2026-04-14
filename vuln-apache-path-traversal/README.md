@@ -28,32 +28,74 @@ See the [Red Team Guide](../../docs/GUIDE_REDTEAM.md) for setup instructions.
 
 ---
 
-### Proof of Pwn
+### Proof of Pwn — Red Team
 
-To validate your pwn, you must submit a Pull Request containing:
+Open a Pull Request that adds **only your own folder** (replace `your-username` with your GitHub username):
 
-1. `writeups/attack/YOUR_GITHUB_USERNAME.md` — a Markdown writeup explaining your approach.
-2. `exploit/exploit.py` — a Python script **written by you** that exploits the vulnerability and retrieves the flag. This file does not exist yet — you are the one who creates it. It must follow the [standard exploit format](../../docs/GUIDE_REDTEAM.md#exploit-format).
-3. The raw flag value (in your writeup) — anyone can verify it against the hash below.
+```
+writeups/attack/your-username/
+├── writeup.md       ← your writeup explaining your approach
+└── exploit.py       ← your exploit script (written by you)
+```
 
-> **How the CI validates your pwn:** When you open a PR, GitHub Actions automatically starts
-> the machine's Docker services and runs your exploit script against them
-> (`TARGET_IP=localhost`). If your script returns exit code `0` and the flag hash matches,
-> your pwn is confirmed.
+**The CI will automatically:**
+1. Start the machine's Docker services
+2. Run your `exploit.py` with `TARGET_IP=localhost TARGET_PORT=80`
+3. Verify the flag hash
+4. Post a comment on your PR with the result
 
-> **Note:** The exploit script you submit becomes the automated regression test for all future
-> Blue Team patches. Once your pwn is validated and merged, your script is locked — it will be
-> replayed automatically against every patch PR.
+> ⚠️ **Folder ownership:** The folder name must exactly match your GitHub username.
+> The CI rejects any PR where the folder name does not match the PR author.
 
-**Flag Hash (SHA-256)**:
+> 🩸 **If you are the first to pwn this machine:** Your `exploit.py` is automatically locked
+> as the regression test for all future Blue Team patches. You earn the **First Blood** badge.
+
+#### exploit.py requirements
+- Must work with `TARGET_IP` and `TARGET_PORT` as environment variables
+- Must follow the [standard exploit format](../../docs/GUIDE_REDTEAM.md#exploit-format):
+  - Exit `0` + print `FLAG_OBTAINED:FLAG{...}` on success
+  - Exit `1` if the vulnerability is not present
+  - Exit `2` if the service is unreachable
+
+#### writeup.md — what to include
+- Your approach and methodology
+- The raw flag value (verifiable against the hash below)
+- Tools and references used
+
+---
+
+### Flag Hash (SHA-256)
+
 ```
 280072fcc625c14d053e1f46d45621459551e0c8ff167fb1b51650c2b861be3d
 ```
 
-To verify your flag locally:
+To verify your flag locally before submitting:
 ```bash
 echo -n "FLAG{your_flag_here}" | sha256sum
 ```
+
+---
+
+### Patch Submission — Blue Team
+
+*(Available once the machine has been pwned at least once — status will update)*
+
+Open a Pull Request that adds **only your own folder**:
+
+```
+writeups/patch/your-username/
+├── writeup.md            ← your patch writeup explaining the fix and its rationale
+├── docker-compose.yml    ← your patched service definition
+└── <any other modified files>
+```
+
+**The CI will automatically:**
+1. Build and start the Docker services from your patched files
+2. Run the SLA health check (all services must still respond)
+3. Replay the locked exploit against your patched version — it **must fail**
+4. Scan for accidentally committed secrets
+5. Post a comment on your PR with the result
 
 ---
 
@@ -69,4 +111,5 @@ echo -n "FLAG{your_flag_here}" | sha256sum
 
 - No brute-forcing, no scanners that generate excessive load.
 - The exploit script must work with only `TARGET_IP` and `TARGET_PORT` as inputs.
+- Your PR must only touch your own folder — no modifications to other players' files.
 - First valid pwn earns the **First Blood** badge.

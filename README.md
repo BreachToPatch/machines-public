@@ -23,18 +23,33 @@ machines-public/
     ├── README.md                           # Public description, rules, flag hash, download link
     ├── CHANGELOG.md                        # Version history (v1.0, v1.1 after patches, etc.)
     ├── writeups/
-    │   ├── attack/                         # Red Team writeups (one .md file per player)
-    │   │   └── .gitkeep                    # Empty until first pwn is submitted
-    │   └── remediation/                    # Blue Team patch writeups
-    │       └── .gitkeep                    # Empty until first patch is submitted
+    │   ├── attack/                         # Red Team submissions — one folder per player
+    │   │   └── {github-username}/
+    │   │       ├── writeup.md              # Their writeup explaining the approach
+    │   │       └── exploit.py              # Their exploit script
+    │   └── patch/                    # Blue Team submissions — one folder per player
+    │       └── {github-username}/
+    │           ├── writeup.md              # Their patch writeup explaining the fix
+    │           └── docker-compose.yml      # Their patched service definition (+ any modified files)
     └── exploit/
-        └── .gitkeep                        # Empty until first Red Teamer submits their exploit
+        └── exploit.py                      # The LOCKED regression exploit — placed automatically
+                                            # by the CI after the first pwn is validated.
+                                            # Players never write here directly.
 ```
 
-> **Note on `exploit/exploit.py`:** This file does **not** exist when a machine is first published.
-> It is submitted by the **first Red Teamer** who successfully pwns the machine, as part of their PR.
-> Once merged, it becomes the automated regression test that validates all future Blue Team patches.
- 
+### Folder ownership rule
+
+**Each player may only create or modify files inside their own `{github-username}/` folder.**
+The CI automatically verifies that the PR author matches the folder name.
+A player cannot submit on behalf of another player.
+
+> **How `exploit/exploit.py` gets there:**
+> Players submit their exploit inside `writeups/attack/{username}/exploit.py`.
+> If the CI validates their pwn **and it is the first pwn on this machine**, the CI automatically
+> copies their script to `exploit/exploit.py` and locks it.
+> From that point on, this file becomes the regression test for all Blue Team patches.
+> No player ever writes to `exploit/exploit.py` directly.
+
 ---
 
 ## The two phases of a machine
@@ -42,26 +57,30 @@ machines-public/
 ### 🔴 Red Team Phase
 - The machine is listed with status **Red Team Active**
 - Players download the Vagrant box and try to pwn it locally (Vagrant + VirtualBox)
-- To claim a pwn, a player opens a PR containing:
-  - A writeup in `writeups/attack/their-username.md`
-  - An exploit script in `exploit/exploit.py` — **written by the player**, not provided in advance
-  - The raw flag value (written in the writeup)
-- The CI pipeline starts the machine's Docker services directly and runs the submitted exploit against them, then verifies the flag hash
-- The **first** validated pwn earns the **First Blood** badge and unlocks the Blue Team phase
-- From that point on, `exploit/exploit.py` is locked — no further changes are accepted
+- To claim a pwn, a player opens a PR adding **only their own folder**:
+  ```
+  writeups/attack/{their-username}/writeup.md
+  writeups/attack/{their-username}/exploit.py
+  ```
+- The CI validates the exploit against the live Docker services and verifies the flag hash
+- The **first** validated pwn earns the **First Blood** badge, locks the exploit, and unlocks the Blue Team phase
+- Subsequent pwns are also validated and rewarded (50 pts) but do not replace the locked exploit
 
 ### 🔵 Blue Team Phase
 - Once a machine is pwned, it enters **Blue Team Active** status
 - The original source code is published in `machines-archive` for analysis
-- Blue Teamers fork the sources, apply a security patch, and open a PR here containing:
-  - A patch description in `writeups/remediation/their-username.md`
-  - The modified source files (in a linked PR to `machines-archive`)
+- Blue Teamers fork the sources, apply a security patch, and open a PR adding **only their own folder**:
+  ```
+  writeups/patch/{their-username}/writeup.md
+  writeups/patch/{their-username}/docker-compose.yml
+  writeups/patch/{their-username}/<any other modified files>
+  ```
 - The CI pipeline verifies:
-  1. All services still respond after starting with Docker Compose (SLA — the patch didn't break anything)
-  2. The `exploit/exploit.py` submitted by the Red Teamer **fails** on the patched version (exit code `1`)
-  3. No new secrets or backdoors were introduced (TruffleHog + Semgrep scan)
-- A validated patch becomes the new version of the machine (v1.1, v1.2, ...) and resets to Red Team Active
-- When a new Red Team phase begins, `exploit/exploit.py` is removed — a new Red Teamer must submit a new one
+  1. All services still respond after starting with Docker Compose (SLA check)
+  2. The locked `exploit/exploit.py` **fails** on the patched version (exit code `1`)
+  3. No new secrets or backdoors were introduced (TruffleHog scan)
+- A validated patch becomes the new version of the machine and resets to Red Team Active
+- When a new Red Team phase begins, `exploit/exploit.py` is removed — the next Red Teamer must submit a new one
 
 ---
 
@@ -118,8 +137,6 @@ Exit code interpretation by the CI:
 | `0`       | ✅ Flag verified — pwn accepted | ❌ Patch insufficient — PR rejected |
 | `1`       | ❌ Exploit failed — pwn rejected | ✅ Vulnerability fixed — patch accepted |
 | `2`       | ❌ Service unreachable | ❌ SLA violation — PR rejected |
- 
-See the [Red Team Guide](../docs/GUIDE_REDTEAM.md) for the full exploit script template and submission instructions.
 
 ---
 
@@ -129,13 +146,13 @@ See the [Red Team Guide](../docs/GUIDE_REDTEAM.md) for the full exploit script t
 1. Read the machine's `README.md` for download instructions
 2. Install [Vagrant](https://www.vagrantup.com/) and [VirtualBox](https://www.virtualbox.org/)
 3. Follow the [Red Team Guide](../docs/GUIDE_REDTEAM.md)
-4. Submit your writeup **and your exploit script** via Pull Request
+4. Open a PR adding only `writeups/attack/{your-github-username}/`
 
 ### As a Blue Teamer
 1. Wait for a machine to enter Blue Team phase (status changes in the README)
 2. Find the machine's source code in `machines-archive`
 3. Follow the [Blue Team Guide](../docs/GUIDE_BLUETEAM.md)
-4. Submit your patch via Pull Request — the CI will run the Red Teamer's exploit against your patch automatically
+4. Open a PR adding only `writeups/patch/{your-github-username}/`
 
 ---
 

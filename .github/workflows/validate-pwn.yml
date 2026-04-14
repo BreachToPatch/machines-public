@@ -1,24 +1,26 @@
 name: Validate PWN Submission
 
-# Triggers when a player opens or updates a PR that adds an exploit script.
-# This workflow:
-#   1. Checks that all required files are present (writeup + exploit.py)
-#   2. Pulls the private CI Docker image and starts the vulnerable services
-#   3. Runs the player's exploit script against the live services
-#   4. Verifies the flag hash
-#   5. Posts an automatic comment on the PR with the result
+# Triggers when a player opens or updates a PR adding files in writeups/attack/.
+#
+# Expected PR structure (player submits only their own folder):
+#   writeups/attack/{github-username}/writeup.md
+#   writeups/attack/{github-username}/exploit.py
+#
+# Security: the CI verifies that the folder name matches the PR author's GitHub username.
+# A player cannot submit inside another player's folder.
+#
+# On first blood: the exploit is automatically copied to exploit/exploit.py and locked.
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
-      - '*/exploit/exploit.py'
-      - '*/writeups/attack/*.md'
+      - '*/writeups/attack/**'
 
 permissions:
-  pull-requests: write   # to post comments on the PR
-  contents: read         # to read repo files
-  packages: read         # to pull from ghcr.io
+  pull-requests: write
+  contents: write        # needed to commit the locked exploit.py on first blood
+  packages: read         # needed to pull from ghcr.io
 
 jobs:
   validate-pwn:
@@ -26,58 +28,78 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # -----------------------------------------------------------------------
-      # STEP 1 — Get the code from the PR branch
-      # -----------------------------------------------------------------------
       - name: Checkout PR branch
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # needed to compare with base branch
+          fetch-depth: 0
 
       # -----------------------------------------------------------------------
-      # STEP 2 — Figure out which machine this PR is targeting
-      # We look at which files changed and extract the machine folder name.
-      # e.g. "vuln-apache-path-traversal/exploit/exploit.py" → "vuln-apache-path-traversal"
+      # STEP 1 — Detect machine and player username from changed file paths
+      # Expected path: {machine}/writeups/attack/{username}/exploit.py
       # -----------------------------------------------------------------------
-      - name: Detect target machine
+      - name: Detect machine and player
         id: detect
         run: |
           CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
           echo "Changed files:"
           echo "$CHANGED"
 
-          MACHINE=$(echo "$CHANGED" \
-            | grep -E '^[^/]+/exploit/exploit\.py$' \
-            | head -1 \
-            | cut -d'/' -f1)
+          EXPLOIT_PATH=$(echo "$CHANGED" \
+            | grep -E '^[^/]+/writeups/attack/[^/]+/exploit\.py$' \
+            | head -1)
 
-          if [ -z "$MACHINE" ]; then
-            echo "is_exploit_pr=false" >> $GITHUB_OUTPUT
-            echo "No exploit/exploit.py detected — skipping PWN validation."
-          else
-            echo "machine=$MACHINE" >> $GITHUB_OUTPUT
-            echo "is_exploit_pr=true" >> $GITHUB_OUTPUT
-            echo "Target machine: $MACHINE"
+          if [ -z "$EXPLOIT_PATH" ]; then
+            echo "is_pwn_pr=false" >> $GITHUB_OUTPUT
+            echo "No exploit.py found in writeups/attack/ — skipping."
+            exit 0
           fi
 
+          MACHINE=$(echo "$EXPLOIT_PATH"  | cut -d'/' -f1)
+          USERNAME=$(echo "$EXPLOIT_PATH" | cut -d'/' -f4)
+          PLAYER_DIR="${MACHINE}/writeups/attack/${USERNAME}"
+
+          echo "machine=$MACHINE"       >> $GITHUB_OUTPUT
+          echo "username=$USERNAME"     >> $GITHUB_OUTPUT
+          echo "player_dir=$PLAYER_DIR" >> $GITHUB_OUTPUT
+          echo "is_pwn_pr=true"         >> $GITHUB_OUTPUT
+          echo "Machine: $MACHINE | Player: $USERNAME"
+
       # -----------------------------------------------------------------------
-      # STEP 3 — Check that all required files are present in the PR
-      # A valid pwn PR must contain: exploit.py AND at least one attack writeup
+      # STEP 2 — Verify the PR author matches the folder name
+      # Prevents a player from submitting inside another player's folder.
+      # -----------------------------------------------------------------------
+      - name: Verify folder ownership
+        if: steps.detect.outputs.is_pwn_pr == 'true'
+        run: |
+          PR_AUTHOR="${{ github.event.pull_request.user.login }}"
+          FOLDER_NAME="${{ steps.detect.outputs.username }}"
+
+          echo "PR author:   $PR_AUTHOR"
+          echo "Folder name: $FOLDER_NAME"
+
+          if [ "$PR_AUTHOR" != "$FOLDER_NAME" ]; then
+            echo "Ownership mismatch: @${PR_AUTHOR} tried to submit in folder '${FOLDER_NAME}'."
+            echo "Your folder must be named exactly after your GitHub username."
+            exit 1
+          fi
+
+          echo "Ownership check passed."
+
+      # -----------------------------------------------------------------------
+      # STEP 3 — Check that both required files are present
       # -----------------------------------------------------------------------
       - name: Check required files
-        if: steps.detect.outputs.is_exploit_pr == 'true'
+        if: steps.detect.outputs.is_pwn_pr == 'true'
         run: |
-          MACHINE="${{ steps.detect.outputs.machine }}"
+          PLAYER_DIR="${{ steps.detect.outputs.player_dir }}"
           ERRORS=""
 
-          if [ ! -f "${MACHINE}/exploit/exploit.py" ]; then
-            ERRORS="${ERRORS}\n- Missing: \`${MACHINE}/exploit/exploit.py\`"
+          if [ ! -f "${PLAYER_DIR}/exploit.py" ]; then
+            ERRORS="${ERRORS}\n- Missing: \`${PLAYER_DIR}/exploit.py\`"
           fi
 
-          WRITEUP_COUNT=$(find "${MACHINE}/writeups/attack/" \
-            -name "*.md" ! -name ".gitkeep" 2>/dev/null | wc -l)
-          if [ "$WRITEUP_COUNT" -eq 0 ]; then
-            ERRORS="${ERRORS}\n- Missing: a writeup file in \`${MACHINE}/writeups/attack/\`"
+          if [ ! -f "${PLAYER_DIR}/writeup.md" ]; then
+            ERRORS="${ERRORS}\n- Missing: \`${PLAYER_DIR}/writeup.md\`"
           fi
 
           if [ -n "$ERRORS" ]; then
@@ -88,11 +110,34 @@ jobs:
           echo "All required files present."
 
       # -----------------------------------------------------------------------
-      # STEP 4 — Read the expected flag hash from the machine's public README
-      # The SHA-256 hash is the only 64-character hex string in the file.
+      # STEP 4 — Verify the PR only touches the player's own folder
+      # Rejects PRs that modify files outside writeups/attack/{username}/
       # -----------------------------------------------------------------------
-      - name: Extract expected flag hash from README
-        if: steps.detect.outputs.is_exploit_pr == 'true'
+      - name: Verify PR scope
+        if: steps.detect.outputs.is_pwn_pr == 'true'
+        run: |
+          MACHINE="${{ steps.detect.outputs.machine }}"
+          USERNAME="${{ steps.detect.outputs.username }}"
+          ALLOWED_PREFIX="${MACHINE}/writeups/attack/${USERNAME}/"
+
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          VIOLATIONS=$(echo "$CHANGED" | grep -v "^${ALLOWED_PREFIX}" || true)
+
+          if [ -n "$VIOLATIONS" ]; then
+            echo "PR touches files outside your allowed folder:"
+            echo "$VIOLATIONS"
+            echo ""
+            echo "Your PR must only add files inside: ${ALLOWED_PREFIX}"
+            exit 1
+          fi
+
+          echo "Scope check passed — all changes are within the allowed folder."
+
+      # -----------------------------------------------------------------------
+      # STEP 5 — Extract expected flag hash from the machine's public README
+      # -----------------------------------------------------------------------
+      - name: Extract expected flag hash
+        if: steps.detect.outputs.is_pwn_pr == 'true'
         id: hash
         run: |
           MACHINE="${{ steps.detect.outputs.machine }}"
@@ -107,12 +152,27 @@ jobs:
           echo "Expected hash: $FLAG_HASH"
 
       # -----------------------------------------------------------------------
-      # STEP 5 — Pull the private CI image and start the vulnerable services
-      # The image is stored in the private btop-sources org on ghcr.io.
-      # GHCR_PULL_TOKEN must be set in machines-public repo secrets.
+      # STEP 6 — Check first blood status
+      # -----------------------------------------------------------------------
+      - name: Check first blood status
+        if: steps.detect.outputs.is_pwn_pr == 'true'
+        id: firstblood
+        run: |
+          MACHINE="${{ steps.detect.outputs.machine }}"
+
+          if [ -f "${MACHINE}/exploit/exploit.py" ]; then
+            echo "is_first_blood=false" >> $GITHUB_OUTPUT
+            echo "First blood already taken — this is a subsequent pwn."
+          else
+            echo "is_first_blood=true" >> $GITHUB_OUTPUT
+            echo "No locked exploit found — this could be the first blood."
+          fi
+
+      # -----------------------------------------------------------------------
+      # STEP 7 — Pull the private CI image and start the vulnerable services
       # -----------------------------------------------------------------------
       - name: Log in to GitHub Container Registry
-        if: steps.detect.outputs.is_exploit_pr == 'true'
+        if: steps.detect.outputs.is_pwn_pr == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -120,14 +180,13 @@ jobs:
           password: ${{ secrets.GHCR_PULL_TOKEN }}
 
       - name: Start Docker services
-        if: steps.detect.outputs.is_exploit_pr == 'true'
+        if: steps.detect.outputs.is_pwn_pr == 'true'
         id: services
         run: |
           MACHINE="${{ steps.detect.outputs.machine }}"
           docker compose -f "${MACHINE}/ci/docker-compose.yml" up -d
 
           echo "Waiting for services to be ready..."
-          # Poll the service every 10 seconds, up to 60 seconds total
           for i in $(seq 1 6); do
             HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
               --max-time 5 http://localhost:80/ || echo "000")
@@ -142,35 +201,31 @@ jobs:
             sleep 10
           done
 
-          if [[ "$(cat $GITHUB_OUTPUT | grep 'status=' | cut -d= -f2)" != "up" ]]; then
+          if ! grep -q "status=up" "$GITHUB_OUTPUT"; then
             echo "Service did not become ready in time."
-            echo "status=down" >> $GITHUB_OUTPUT
             exit 1
           fi
 
       # -----------------------------------------------------------------------
-      # STEP 6 — Run the player's exploit script
-      # TARGET_IP=localhost because the Docker container is on the same runner.
-      # We capture stdout, stderr, and the exit code separately.
+      # STEP 8 — Run the player's exploit script
       # -----------------------------------------------------------------------
       - name: Run exploit script
-        if: steps.detect.outputs.is_exploit_pr == 'true'
+        if: steps.detect.outputs.is_pwn_pr == 'true'
         id: exploit
         run: |
-          MACHINE="${{ steps.detect.outputs.machine }}"
+          PLAYER_DIR="${{ steps.detect.outputs.player_dir }}"
 
           set +e
           STDOUT=$(TARGET_IP=localhost TARGET_PORT=80 \
-            python3 "${MACHINE}/exploit/exploit.py" 2>/tmp/exploit_stderr)
+            python3 "${PLAYER_DIR}/exploit.py" 2>/tmp/exploit_stderr)
           EXIT_CODE=$?
           STDERR=$(cat /tmp/exploit_stderr)
           set -e
 
           echo "Exit code: $EXIT_CODE"
-          echo "Stdout: $STDOUT"
-          echo "Stderr: $STDERR"
+          echo "Stdout:    $STDOUT"
+          echo "Stderr:    $STDERR"
 
-          # Save to outputs for next step
           echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
           {
             echo "stdout<<BTOP_EOF"
@@ -179,12 +234,10 @@ jobs:
           } >> $GITHUB_OUTPUT
 
       # -----------------------------------------------------------------------
-      # STEP 7 — Verify the flag hash
-      # Extract the flag value from "FLAG_OBTAINED:FLAG{...}" in stdout,
-      # compute its SHA-256, and compare with the expected hash from the README.
+      # STEP 9 — Verify the flag hash
       # -----------------------------------------------------------------------
       - name: Verify flag hash
-        if: steps.detect.outputs.is_exploit_pr == 'true'
+        if: steps.detect.outputs.is_pwn_pr == 'true'
         id: verify
         run: |
           EXIT_CODE="${{ steps.exploit.outputs.exit_code }}"
@@ -198,7 +251,10 @@ jobs:
             exit 0
           fi
 
-          FLAG_VALUE=$(echo "$STDOUT" | grep 'FLAG_OBTAINED:' | sed 's/FLAG_OBTAINED://' | tr -d '[:space:]')
+          FLAG_VALUE=$(echo "$STDOUT" \
+            | grep 'FLAG_OBTAINED:' \
+            | sed 's/FLAG_OBTAINED://' \
+            | tr -d '[:space:]')
 
           if [ -z "$FLAG_VALUE" ]; then
             echo "result=rejected" >> $GITHUB_OUTPUT
@@ -213,41 +269,76 @@ jobs:
 
           if [ "$ACTUAL" = "$EXPECTED" ]; then
             echo "result=validated" >> $GITHUB_OUTPUT
-            echo "flag=$FLAG_VALUE" >> $GITHUB_OUTPUT
+            echo "flag=$FLAG_VALUE"  >> $GITHUB_OUTPUT
           else
-            echo "result=rejected" >> $GITHUB_OUTPUT
+            echo "result=rejected"  >> $GITHUB_OUTPUT
             echo "reason=Flag hash does not match. Double-check the flag value in your writeup." \
               >> $GITHUB_OUTPUT
           fi
 
       # -----------------------------------------------------------------------
-      # STEP 8 — Post an automatic comment on the PR with the result
+      # STEP 10 — On first blood: copy exploit to exploit/exploit.py and lock it
+      # -----------------------------------------------------------------------
+      - name: Lock exploit on first blood
+        if: |
+          steps.detect.outputs.is_pwn_pr == 'true' &&
+          steps.verify.outputs.result == 'validated' &&
+          steps.firstblood.outputs.is_first_blood == 'true'
+        run: |
+          MACHINE="${{ steps.detect.outputs.machine }}"
+          PLAYER_DIR="${{ steps.detect.outputs.player_dir }}"
+          USERNAME="${{ steps.detect.outputs.username }}"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          mkdir -p "${MACHINE}/exploit"
+          cp "${PLAYER_DIR}/exploit.py" "${MACHINE}/exploit/exploit.py"
+
+          # Add a header identifying the first blood author
+          HEADER="# Locked by CI on first blood — submitted by @${USERNAME}\n"
+          sed -i "1s|^|${HEADER}|" "${MACHINE}/exploit/exploit.py"
+
+          git add "${MACHINE}/exploit/exploit.py"
+          git commit -m "ci: lock exploit for ${MACHINE} — first blood by @${USERNAME} [skip ci]"
+          git push origin HEAD:${{ github.head_ref }}
+
+          echo "Exploit locked at ${MACHINE}/exploit/exploit.py"
+
+      # -----------------------------------------------------------------------
+      # STEP 11 — Post result comment on the PR
       # -----------------------------------------------------------------------
       - name: Post result comment on PR
-        if: steps.detect.outputs.is_exploit_pr == 'true'
+        if: steps.detect.outputs.is_pwn_pr == 'true'
         uses: actions/github-script@v7
         with:
           script: |
-            const result  = '${{ steps.verify.outputs.result }}';
-            const machine = '${{ steps.detect.outputs.machine }}';
-            const reason  = `${{ steps.verify.outputs.reason }}`;
+            const result       = '${{ steps.verify.outputs.result }}';
+            const machine      = '${{ steps.detect.outputs.machine }}';
+            const username     = '${{ steps.detect.outputs.username }}';
+            const reason       = `${{ steps.verify.outputs.reason }}`;
+            const isFirstBlood = '${{ steps.firstblood.outputs.is_first_blood }}' === 'true';
+            const validated    = result === 'validated';
 
-            const validated = result === 'validated';
+            let body;
+            if (validated) {
+              const badge = isFirstBlood
+                ? `\n> 🩸 **First Blood!** Your exploit has been locked as the regression test for all future patches.`
+                : `\n> ⚔️ Subsequent pwn — 50 pts awarded.`;
 
-            const body = validated
-              ? `## 🐝 BtoP — PWN Validation: ✅ ACCEPTED
+              body = `## 🐝 BtoP — PWN Validation: ✅ ACCEPTED
 
             **Machine:** \`${machine}\`
+            **Player:** @${username}
 
             Your exploit ran successfully and the flag hash matches.
             A maintainer will review your writeup and merge this PR.
-
-            > 🩸 If this is the first validated pwn on this machine, you earn the **First Blood** badge.
-            > Your \`exploit.py\` is now locked — it will be the regression test for all future patches.`
-
-              : `## 🐝 BtoP — PWN Validation: ❌ REJECTED
+            ${badge}`;
+            } else {
+              body = `## 🐝 BtoP — PWN Validation: ❌ REJECTED
 
             **Machine:** \`${machine}\`
+            **Player:** @${username}
 
             **Reason:** ${reason}
 
@@ -255,8 +346,10 @@ jobs:
             - Make sure your script works with \`TARGET_IP=localhost TARGET_PORT=80\`
             - Your script must print \`FLAG_OBTAINED:FLAG{...}\` to stdout and exit with code \`0\`
             - Verify the flag hash: \`echo -n "FLAG{...}" | sha256sum\`
+            - Your folder name must exactly match your GitHub username
 
             See the [Red Team Guide](../docs/GUIDE_REDTEAM.md) for the exploit format specification.`;
+            }
 
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
@@ -266,10 +359,10 @@ jobs:
             });
 
       # -----------------------------------------------------------------------
-      # STEP 9 — Always clean up Docker services, even if the workflow failed
+      # STEP 12 — Always clean up Docker services
       # -----------------------------------------------------------------------
       - name: Stop Docker services
-        if: always() && steps.detect.outputs.is_exploit_pr == 'true'
+        if: always() && steps.detect.outputs.is_pwn_pr == 'true'
         run: |
           MACHINE="${{ steps.detect.outputs.machine }}"
           docker compose -f "${MACHINE}/ci/docker-compose.yml" down --volumes 2>/dev/null || true
