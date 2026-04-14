@@ -1,0 +1,127 @@
+name: Update Leaderboard
+
+# Triggers every time a PR is merged into main.
+# Detects whether it was a pwn (attack) or a patch submission,
+# calculates the player's new score, and commits the result to
+# the leaderboard repo.
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+
+jobs:
+  update-leaderboard:
+    name: Update leaderboard
+    runs-on: ubuntu-latest
+    # Only run when the PR was actually merged, not just closed/rejected
+    if: github.event.pull_request.merged == true
+
+    steps:
+      - name: Checkout machines-public
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # needed to diff the PR commits
+
+      # -----------------------------------------------------------------------
+      # STEP 1 — Read the branch name to detect submission type and player
+      # Branch format: attack/{username}/{machine} or patch/{username}/{machine}
+      # -----------------------------------------------------------------------
+      - name: Detect submission type
+        id: detect
+        run: |
+          BRANCH="${{ github.event.pull_request.head.ref }}"
+          echo "Branch: $BRANCH"
+
+          if [[ "$BRANCH" =~ ^attack/([^/]+)/([^/]+)$ ]]; then
+            echo "type=attack"                    >> $GITHUB_OUTPUT
+            echo "username=${BASH_REMATCH[1]}"    >> $GITHUB_OUTPUT
+            echo "machine=${BASH_REMATCH[2]}"     >> $GITHUB_OUTPUT
+            echo "Detected: pwn submission by ${BASH_REMATCH[1]} on ${BASH_REMATCH[2]}"
+
+          elif [[ "$BRANCH" =~ ^patch/([^/]+)/([^/]+)$ ]]; then
+            echo "type=patch"                     >> $GITHUB_OUTPUT
+            echo "username=${BASH_REMATCH[1]}"    >> $GITHUB_OUTPUT
+            echo "machine=${BASH_REMATCH[2]}"     >> $GITHUB_OUTPUT
+            echo "Detected: patch submission by ${BASH_REMATCH[1]} on ${BASH_REMATCH[2]}"
+
+          else
+            echo "type=other" >> $GITHUB_OUTPUT
+            echo "Branch does not match attack/* or patch/* — no scoring needed."
+          fi
+
+      # -----------------------------------------------------------------------
+      # STEP 2 — For attack PRs: check whether this was the First Blood
+      # First Blood = the PR created exploit/exploit.py (the locked exploit)
+      # -----------------------------------------------------------------------
+      - name: Check first blood status
+        if: steps.detect.outputs.type == 'attack'
+        id: firstblood
+        run: |
+          MACHINE="${{ steps.detect.outputs.machine }}"
+
+          # List all files changed by this PR
+          CHANGED=$(git diff --name-only \
+            ${{ github.event.pull_request.base.sha }} \
+            ${{ github.event.pull_request.head.sha }})
+
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          # First blood = the CI locked exploit/exploit.py in this PR
+          if echo "$CHANGED" | grep -q "^${MACHINE}/exploit/exploit\.py$"; then
+            echo "is_first_blood=true" >> $GITHUB_OUTPUT
+            echo "First Blood confirmed — exploit.py was created in this PR."
+          else
+            echo "is_first_blood=false" >> $GITHUB_OUTPUT
+            echo "Subsequent pwn — exploit.py already existed."
+          fi
+
+      # -----------------------------------------------------------------------
+      # STEP 3 — Check out the leaderboard repo using the write token
+      # This checks out BreachToPatch/leaderboard into a subfolder
+      # -----------------------------------------------------------------------
+      - name: Checkout leaderboard repo
+        if: steps.detect.outputs.type != 'other'
+        uses: actions/checkout@v4
+        with:
+          repository: BreachToPatch/leaderboard
+          token: ${{ secrets.LEADERBOARD_WRITE_TOKEN }}
+          path: leaderboard-repo
+
+      # -----------------------------------------------------------------------
+      # STEP 4 — Run the Python scoring script
+      # -----------------------------------------------------------------------
+      - name: Run leaderboard update script
+        if: steps.detect.outputs.type != 'other'
+        run: |
+          python3 .github/scripts/update_leaderboard.py
+        env:
+          SUBMISSION_TYPE:  ${{ steps.detect.outputs.type }}
+          USERNAME:         ${{ steps.detect.outputs.username }}
+          MACHINE:          ${{ steps.detect.outputs.machine }}
+          IS_FIRST_BLOOD:   ${{ steps.firstblood.outputs.is_first_blood || 'false' }}
+          LEADERBOARD_PATH: leaderboard-repo/leaderboard.json
+
+      # -----------------------------------------------------------------------
+      # STEP 5 — Commit and push the updated leaderboard.json
+      # -----------------------------------------------------------------------
+      - name: Commit and push leaderboard update
+        if: steps.detect.outputs.type != 'other'
+        run: |
+          cd leaderboard-repo
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add leaderboard.json
+
+          # Only commit if there are actual changes
+          if git diff --staged --quiet; then
+            echo "No changes to leaderboard — nothing to commit."
+          else
+            git commit -m "score: ${{ steps.detect.outputs.username }} — ${{ steps.detect.outputs.type }} on ${{ steps.detect.outputs.machine }}"
+            git push
+            echo "Leaderboard updated successfully."
+          fi
