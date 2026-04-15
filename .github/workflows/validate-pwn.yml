@@ -6,15 +6,23 @@ name: Validate PWN Submission
 # Example: attack/alice/vuln-apache-path-traversal
 #
 # Expected PR structure (player submits only their own folder):
-#   writeups/attack/{github-username}/writeup.md
-#   writeups/attack/{github-username}/exploit.py
+#   {machine}/writeups/attack/{github-username}/writeup.md
+#   {machine}/writeups/attack/{github-username}/exploit.py
 #
 # Security checks:
 #   - Branch name must follow the convention attack/{username}/{machine}
 #   - Folder name must match the PR author's GitHub username
 #   - PR must only touch files inside the player's own folder
 #
-# On first blood: the exploit is automatically copied to exploit/exploit.py and locked.
+# Versioning:
+#   - Each machine has an accepted_hashes.json listing all valid flag hashes
+#   - Only a pwn against the CURRENT version can trigger First Blood and archiving
+#   - A pwn against an older (but non-retired) version is still awarded 50 pts
+#     but does NOT lock an exploit or trigger the archive workflow
+#
+# On first blood (current version only):
+#   - The exploit is automatically copied to exploit/exploit.py and locked
+#   - The archive workflow in btop-sources is triggered to publish sanitized sources
 
 on:
   pull_request:
@@ -90,59 +98,43 @@ jobs:
             exit 0
           fi
 
-          MACHINE=$(echo "$EXPLOIT_PATH"  | cut -d'/' -f1)
-          USERNAME=$(echo "$EXPLOIT_PATH" | cut -d'/' -f4)
+          MACHINE=$(echo "$EXPLOIT_PATH"   | cut -d'/' -f1)
+          USERNAME=$(echo "$EXPLOIT_PATH"  | cut -d'/' -f4)
           PLAYER_DIR="${MACHINE}/writeups/attack/${USERNAME}"
 
-          echo "machine=$MACHINE"       >> $GITHUB_OUTPUT
-          echo "username=$USERNAME"     >> $GITHUB_OUTPUT
-          echo "player_dir=$PLAYER_DIR" >> $GITHUB_OUTPUT
-          echo "is_pwn_pr=true"         >> $GITHUB_OUTPUT
-          echo "Machine: $MACHINE | Player: $USERNAME"
+          echo "is_pwn_pr=true"          >> $GITHUB_OUTPUT
+          echo "machine=$MACHINE"        >> $GITHUB_OUTPUT
+          echo "username=$USERNAME"      >> $GITHUB_OUTPUT
+          echo "player_dir=$PLAYER_DIR"  >> $GITHUB_OUTPUT
+          echo "Detected: machine=$MACHINE, player=$USERNAME"
 
       # -----------------------------------------------------------------------
-      # STEP 3 — Cross-check branch name vs folder name vs PR author
-      # All three must be consistent:
-      #   branch: attack/{username}/{machine}
-      #   folder: {machine}/writeups/attack/{username}/
-      #   PR author: {username}
+      # STEP 3 — Cross-check branch username vs folder username vs PR author
+      # Prevents submitting on behalf of another player
       # -----------------------------------------------------------------------
-      - name: Cross-check branch, folder, and PR author
+      - name: Cross-check identity
         if: steps.detect.outputs.is_pwn_pr == 'true'
         run: |
+          BRANCH_USER="${{ steps.branch.outputs.branch_username }}"
+          FOLDER_USER="${{ steps.detect.outputs.username }}"
           PR_AUTHOR="${{ github.event.pull_request.user.login }}"
-          FOLDER_USERNAME="${{ steps.detect.outputs.username }}"
-          FOLDER_MACHINE="${{ steps.detect.outputs.machine }}"
-          BRANCH_USERNAME="${{ steps.branch.outputs.branch_username }}"
-          BRANCH_MACHINE="${{ steps.branch.outputs.branch_machine }}"
-          ERRORS=""
 
-          echo "PR author:      $PR_AUTHOR"
-          echo "Folder user:    $FOLDER_USERNAME"
-          echo "Branch user:    $BRANCH_USERNAME"
-          echo "Folder machine: $FOLDER_MACHINE"
-          echo "Branch machine: $BRANCH_MACHINE"
+          echo "Branch username: $BRANCH_USER"
+          echo "Folder username: $FOLDER_USER"
+          echo "PR author:       $PR_AUTHOR"
 
-          if [ "$PR_AUTHOR" != "$FOLDER_USERNAME" ]; then
-            ERRORS="${ERRORS}\n- PR author (@${PR_AUTHOR}) does not match folder name (${FOLDER_USERNAME})."
-          fi
-
-          if [ "$PR_AUTHOR" != "$BRANCH_USERNAME" ]; then
-            ERRORS="${ERRORS}\n- PR author (@${PR_AUTHOR}) does not match branch username (${BRANCH_USERNAME})."
-          fi
-
-          if [ "$FOLDER_MACHINE" != "$BRANCH_MACHINE" ]; then
-            ERRORS="${ERRORS}\n- Machine in folder (${FOLDER_MACHINE}) does not match machine in branch (${BRANCH_MACHINE})."
-          fi
-
-          if [ -n "$ERRORS" ]; then
-            echo -e "Consistency check failed:${ERRORS}"
-            echo ""
-            echo "Make sure your branch is named: attack/${PR_AUTHOR}/${FOLDER_MACHINE}"
+          if [ "$BRANCH_USER" != "$FOLDER_USER" ]; then
+            echo "Mismatch: branch username ($BRANCH_USER) differs from folder username ($FOLDER_USER)."
             exit 1
           fi
 
-          echo "All consistency checks passed."
+          if [ "$BRANCH_USER" != "$PR_AUTHOR" ]; then
+            echo "Mismatch: branch username ($BRANCH_USER) differs from PR author ($PR_AUTHOR)."
+            echo "You must submit under your own GitHub username."
+            exit 1
+          fi
+
+          echo "Identity check passed."
 
       # -----------------------------------------------------------------------
       # STEP 4 — Check that both required files are present
@@ -193,25 +185,63 @@ jobs:
           echo "Scope check passed — all changes are within the allowed folder."
 
       # -----------------------------------------------------------------------
-      # STEP 6 — Extract expected flag hash from the machine's public README
+      # STEP 6 — Read accepted_hashes.json for this machine
+      #
+      # Replaces the old single-hash extraction from README.md.
+      # accepted_hashes.json lists all valid flag hashes across versions.
+      # The CI accepts any non-retired hash, but only a pwn against the
+      # current_version can trigger First Blood and the archive workflow.
       # -----------------------------------------------------------------------
-      - name: Extract expected flag hash
+      - name: Read accepted hashes
         if: steps.detect.outputs.is_pwn_pr == 'true'
         id: hash
         run: |
           MACHINE="${{ steps.detect.outputs.machine }}"
-          FLAG_HASH=$(grep -E '^[a-f0-9]{64}$' "${MACHINE}/README.md" | head -1)
+          HASHES_FILE="${MACHINE}/accepted_hashes.json"
 
-          if [ -z "$FLAG_HASH" ]; then
-            echo "Could not extract flag hash from ${MACHINE}/README.md"
+          if [ ! -f "$HASHES_FILE" ]; then
+            echo "ERROR: $HASHES_FILE not found."
+            echo "This file is required and must list all valid flag hashes for this machine."
             exit 1
           fi
 
-          echo "flag_hash=$FLAG_HASH" >> $GITHUB_OUTPUT
-          echo "Expected hash: $FLAG_HASH"
+          # Extract the hash of the current version (First Blood candidate)
+          CURRENT_HASH=$(python3 - <<'PYEOF'
+          import json, sys
+          with open("$MACHINE/accepted_hashes.json") as f:
+              data = json.load(f)
+          current = data["current_version"]
+          for v in data["versions"]:
+              if v["version"] == current and not v.get("retired", False):
+                  print(v["flag_sha256"])
+                  sys.exit(0)
+          print("")   # no current version found — will cause rejection downstream
+          PYEOF
+                    )
+
+                    # Extract all non-retired hashes as a space-separated list
+                    ALL_VALID_HASHES=$(python3 - <<'PYEOF'
+          import json
+          with open("$MACHINE/accepted_hashes.json") as f:
+              data = json.load(f)
+          valid = [v["flag_sha256"] for v in data["versions"] if not v.get("retired", False)]
+          print(" ".join(valid))
+          PYEOF
+          )
+
+          if [ -z "$CURRENT_HASH" ]; then
+            echo "ERROR: Could not find a non-retired current version hash in $HASHES_FILE"
+            exit 1
+          fi
+
+          echo "current_hash=$CURRENT_HASH"       >> $GITHUB_OUTPUT
+          echo "all_valid_hashes=$ALL_VALID_HASHES" >> $GITHUB_OUTPUT
+          echo "Current version hash: $CURRENT_HASH"
+          echo "All valid hashes:     $ALL_VALID_HASHES"
 
       # -----------------------------------------------------------------------
       # STEP 7 — Check first blood status
+      # First blood = no locked exploit.py exists yet for this machine
       # -----------------------------------------------------------------------
       - name: Check first blood status
         if: steps.detect.outputs.is_pwn_pr == 'true'
@@ -294,6 +324,10 @@ jobs:
 
       # -----------------------------------------------------------------------
       # STEP 10 — Verify the flag hash
+      #
+      # Checks the submitted flag against ALL non-retired hashes in
+      # accepted_hashes.json. Also determines whether the flag belongs to
+      # the current version — required for First Blood and archive trigger.
       # -----------------------------------------------------------------------
       - name: Verify flag hash
         if: steps.detect.outputs.is_pwn_pr == 'true'
@@ -301,48 +335,75 @@ jobs:
         run: |
           EXIT_CODE="${{ steps.exploit.outputs.exit_code }}"
           STDOUT="${{ steps.exploit.outputs.stdout }}"
-          EXPECTED="${{ steps.hash.outputs.flag_hash }}"
+          CURRENT_HASH="${{ steps.hash.outputs.current_hash }}"
+          ALL_VALID="${{ steps.hash.outputs.all_valid_hashes }}"
 
+          # Exit code must be 0 for the exploit to be considered successful
           if [ "$EXIT_CODE" != "0" ]; then
-            echo "result=rejected" >> $GITHUB_OUTPUT
+            echo "result=rejected"           >> $GITHUB_OUTPUT
+            echo "is_current_version=false"  >> $GITHUB_OUTPUT
             echo "reason=Exploit script returned exit code \`$EXIT_CODE\` — flag was not obtained." \
               >> $GITHUB_OUTPUT
             exit 0
           fi
 
+          # Extract the flag from stdout
           FLAG_VALUE=$(echo "$STDOUT" \
             | grep 'FLAG_OBTAINED:' \
             | sed 's/FLAG_OBTAINED://' \
             | tr -d '[:space:]')
 
           if [ -z "$FLAG_VALUE" ]; then
-            echo "result=rejected" >> $GITHUB_OUTPUT
-            echo "reason=No \`FLAG_OBTAINED:\` line found in exploit output." >> $GITHUB_OUTPUT
+            echo "result=rejected"           >> $GITHUB_OUTPUT
+            echo "is_current_version=false"  >> $GITHUB_OUTPUT
+            echo "reason=No \`FLAG_OBTAINED:\` line found in exploit output." \
+              >> $GITHUB_OUTPUT
             exit 0
           fi
 
+          # Compute the SHA-256 of the submitted flag
           ACTUAL=$(echo -n "$FLAG_VALUE" | sha256sum | cut -d' ' -f1)
-          echo "Submitted flag: $FLAG_VALUE"
-          echo "Actual hash:    $ACTUAL"
-          echo "Expected hash:  $EXPECTED"
+          echo "Submitted flag hash: $ACTUAL"
+          echo "Current version hash: $CURRENT_HASH"
+          echo "All valid hashes:     $ALL_VALID"
 
-          if [ "$ACTUAL" = "$EXPECTED" ]; then
-            echo "result=validated" >> $GITHUB_OUTPUT
+          # Check against all non-retired hashes
+          if echo "$ALL_VALID" | tr ' ' '\n' | grep -qx "$ACTUAL"; then
+            echo "result=validated"  >> $GITHUB_OUTPUT
             echo "flag=$FLAG_VALUE"  >> $GITHUB_OUTPUT
+
+            # Is it the current version? Required for First Blood + archive
+            if [ "$ACTUAL" = "$CURRENT_HASH" ]; then
+              echo "is_current_version=true"  >> $GITHUB_OUTPUT
+              echo "Flag matches current version."
+            else
+              echo "is_current_version=false" >> $GITHUB_OUTPUT
+              echo "Flag matches an older (non-retired) version — not eligible for First Blood."
+            fi
           else
-            echo "result=rejected"  >> $GITHUB_OUTPUT
-            echo "reason=Flag hash does not match. Double-check the flag value in your writeup." \
+            echo "result=rejected"           >> $GITHUB_OUTPUT
+            echo "is_current_version=false"  >> $GITHUB_OUTPUT
+            echo "reason=Flag hash does not match any accepted version. Double-check the flag value in your writeup." \
               >> $GITHUB_OUTPUT
           fi
 
       # -----------------------------------------------------------------------
-      # STEP 11 — On first blood: copy exploit to exploit/exploit.py and lock it
+      # STEP 11 — On first blood (current version only): lock the exploit
+      #
+      # Only runs when:
+      #   - The pwn is validated
+      #   - No locked exploit exists yet (is_first_blood == true)
+      #   - The flag matches the CURRENT version (is_current_version == true)
+      #
+      # A pwn against an older version earns points but does NOT lock an
+      # exploit and does NOT trigger archiving.
       # -----------------------------------------------------------------------
       - name: Lock exploit on first blood
         if: |
           steps.detect.outputs.is_pwn_pr == 'true' &&
           steps.verify.outputs.result == 'validated' &&
-          steps.firstblood.outputs.is_first_blood == 'true'
+          steps.firstblood.outputs.is_first_blood == 'true' &&
+          steps.verify.outputs.is_current_version == 'true'
         run: |
           MACHINE="${{ steps.detect.outputs.machine }}"
           PLAYER_DIR="${{ steps.detect.outputs.player_dir }}"
@@ -365,25 +426,116 @@ jobs:
           echo "Exploit locked at ${MACHINE}/exploit/exploit.py"
 
       # -----------------------------------------------------------------------
-      # STEP 12 — Post result comment on the PR
+      # STEP 12 — On first blood (current version only): trigger archive workflow
+      #
+      # Fires a workflow_dispatch event in btop-sources/machines-sources to:
+      #   1. Sanitize the private sources (remove flag value, remove reference exploit)
+      #   2. Push the sanitized folder to BreachToPatch/machines-archive
+      #
+      # Uses ARCHIVE_TRIGGER_TOKEN — a PAT with repo+workflow scope on btop-sources.
+      # continue-on-error: true so that an archive failure never blocks the pwn.
+      # The pwn is already validated and the exploit locked at this point.
+      # -----------------------------------------------------------------------
+      - name: Trigger archive workflow in btop-sources
+        if: |
+          steps.detect.outputs.is_pwn_pr == 'true' &&
+          steps.verify.outputs.result == 'validated' &&
+          steps.firstblood.outputs.is_first_blood == 'true' &&
+          steps.verify.outputs.is_current_version == 'true'
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.ARCHIVE_TRIGGER_TOKEN }}
+          script: |
+            const machine  = '${{ steps.detect.outputs.machine }}';
+            const username = '${{ steps.detect.outputs.username }}';
+            const prUrl    = context.payload.pull_request.html_url;
+
+            // Map public slug → internal machine folder name.
+            // Add entries here as new machines are added.
+            const slugToFolder = {
+              'vuln-apache-path-traversal': 'bee-path',
+            };
+
+            const machineName = slugToFolder[machine];
+            if (!machineName) {
+              core.warning(`No internal folder mapping found for slug "${machine}". Archive not triggered.`);
+              return;
+            }
+
+            await github.rest.actions.createWorkflowDispatch({
+              owner:       'btop-sources',
+              repo:        'machines-sources',
+              workflow_id: 'archive-machine.yml',
+              ref:         'main',
+              inputs: {
+                machine_name:    machineName,
+                machine_slug:    machine,
+                version:         'v1.0',
+                pr_url:          prUrl,
+                first_blood_by:  username,
+              }
+            });
+
+            console.log(`Archive workflow dispatched for ${machine} (${machineName}) v1.0`);
+
+      # -----------------------------------------------------------------------
+      # STEP 13 — Post result comment on the PR
+      #
+      # Covers all cases:
+      #   - Validated, first blood on current version  → 100 pts + sources unlocked
+      #   - Validated, subsequent pwn on current version → 50 pts + whitebox notice
+      #   - Validated, pwn on older version              → 50 pts + older version notice
+      #   - Rejected                                     → reason + fix instructions
       # -----------------------------------------------------------------------
       - name: Post result comment on PR
         if: steps.detect.outputs.is_pwn_pr == 'true'
         uses: actions/github-script@v7
         with:
           script: |
-            const result       = '${{ steps.verify.outputs.result }}';
-            const machine      = '${{ steps.detect.outputs.machine }}';
-            const username     = '${{ steps.detect.outputs.username }}';
-            const reason       = `${{ steps.verify.outputs.reason }}`;
-            const isFirstBlood = '${{ steps.firstblood.outputs.is_first_blood }}' === 'true';
-            const validated    = result === 'validated';
+            const result           = '${{ steps.verify.outputs.result }}';
+            const machine          = '${{ steps.detect.outputs.machine }}';
+            const username         = '${{ steps.detect.outputs.username }}';
+            const reason           = `${{ steps.verify.outputs.reason }}`;
+            const isFirstBlood     = '${{ steps.firstblood.outputs.is_first_blood }}' === 'true';
+            const isCurrentVersion = '${{ steps.verify.outputs.is_current_version }}' === 'true';
+            const validated        = result === 'validated';
+
+            const archiveUrl =
+              `https://github.com/BreachToPatch/machines-archive`;
 
             let body;
+
             if (validated) {
-              const badge = isFirstBlood
-                ? `\n> 🩸 **First Blood!** Your exploit has been locked as the regression test for all future patches.`
-                : `\n> ⚔️ Subsequent pwn — 50 pts awarded.`;
+              // ── Determine points and badge line ──────────────────────────
+              let badgeLine;
+
+              if (isFirstBlood && isCurrentVersion) {
+                // Best case: first ever pwn on the current version
+                badgeLine = [
+                  `> 🩸 **First Blood!** You are the first player to pwn this machine.`,
+                  `> Your exploit has been locked as the regression test for all future patches.`,
+                  `> The source code is now being published to [machines-archive](${archiveUrl}) for Blue Teamers.`,
+                  `> **+100 pts**`,
+                ].join('\n');
+
+              } else if (!isFirstBlood && isCurrentVersion) {
+                // Subsequent pwn on the current version — whitebox notice
+                badgeLine = [
+                  `> ⚔️ **Subsequent pwn.** Well played — +50 pts.`,
+                  `> 💡 **Whitebox available:** The source code for this machine is public.`,
+                  `> You can study the original implementation at [machines-archive](${archiveUrl}).`,
+                ].join('\n');
+
+              } else {
+                // Pwn on an older (non-retired) version
+                badgeLine = [
+                  `> ⚔️ **Older version pwn — +50 pts.**`,
+                  `> ℹ️ You exploited a previous version of this machine.`,
+                  `> The current version may have a different flag — check the machine README for the latest hash.`,
+                  `> 💡 **Whitebox available:** Sources are at [machines-archive](${archiveUrl}).`,
+                ].join('\n');
+              }
 
               body = `## 🐝 BtoP — PWN Validation: ✅ ACCEPTED
 
@@ -392,9 +544,12 @@ jobs:
 
             Your exploit ran successfully and the flag hash matches.
             A maintainer will review your writeup and merge this PR.
-            ${badge}`;
-            } else {
-              body = `## 🐝 BtoP — PWN Validation: ❌ REJECTED
+
+            ${badgeLine}`;
+
+                        } else {
+                          // ── Rejected ─────────────────────────────────────────────────
+                          body = `## 🐝 BtoP — PWN Validation: ❌ REJECTED
 
             **Machine:** \`${machine}\`
             **Player:** @${username}
@@ -406,8 +561,9 @@ jobs:
             - Make sure your script works with \`TARGET_IP=localhost TARGET_PORT=80\`
             - Your script must print \`FLAG_OBTAINED:FLAG{...}\` to stdout and exit with code \`0\`
             - Verify the flag hash: \`echo -n "FLAG{...}" | sha256sum\`
+            - Make sure you are submitting the flag from the current version of the machine
 
-            See the [Red Team Guide](../docs/GUIDE_REDTEAM.md) for full instructions.`;
+            See the [Red Team Guide](https://github.com/BreachToPatch/docs/blob/main/GUIDE_REDTEAM.md) for full instructions.`;
             }
 
             await github.rest.issues.createComment({
@@ -418,7 +574,7 @@ jobs:
             });
 
       # -----------------------------------------------------------------------
-      # STEP 13 — Always clean up Docker services
+      # STEP 14 — Always clean up Docker services
       # -----------------------------------------------------------------------
       - name: Stop Docker services
         if: always() && steps.detect.outputs.is_pwn_pr == 'true'
