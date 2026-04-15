@@ -150,23 +150,43 @@ jobs:
           echo "Scope check passed."
 
       # -----------------------------------------------------------------------
-      # STEP 6 — Scan patch for accidentally committed secrets
+      # STEP 6 — Scan the patch for accidentally committed secrets
+      # Simple grep check: catches GitHub tokens, real flags, and common patterns.
       # -----------------------------------------------------------------------
       - name: Scan patch for secrets
         if: steps.detect.outputs.is_patch_pr == 'true'
-        id: secrets_scan
-        uses: trufflesecurity/trufflehog@main
-        with:
-          base: ${{ github.event.pull_request.base.sha }}
-          head: ${{ github.event.pull_request.head.sha }}
-          extra_args: --only-verified
-        continue-on-error: true
+        run: |
+          PATCH_DIR="${{ steps.detect.outputs.patch_dir }}"
+
+          # Get all content added in this PR (lines starting with +)
+          DIFF=$(git diff origin/${{ github.base_ref }}...HEAD -- "$PATCH_DIR")
+
+          FOUND=""
+
+          # GitHub tokens (classic + fine-grained)
+          echo "$DIFF" | grep -E '^\+' | grep -qE 'ghp_[A-Za-z0-9]{36}|ghs_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82}' \
+            && FOUND="${FOUND}\n- GitHub Personal Access Token detected"
+
+          # Real flag values (anything that's not PLACEHOLDER or REDACTED)
+          echo "$DIFF" | grep -E '^\+' | grep -E 'FLAG\{' | grep -vE 'FLAG\{PLACEHOLDER\}|FLAG\{REDACTED\}|\$FLAG_VALUE|\$\{FLAG_VALUE\}' \
+            && FOUND="${FOUND}\n- Possible real flag value detected (use FLAG{PLACEHOLDER} instead)"
+
+          # AWS, private keys
+          echo "$DIFF" | grep -E '^\+' | grep -qE 'AKIA[A-Z0-9]{16}|-----BEGIN (RSA|EC|OPENSSH) PRIVATE KEY' \
+            && FOUND="${FOUND}\n- AWS key or private key detected"
+
+          if [ -n "$FOUND" ]; then
+            echo -e "Secrets scan failed:$FOUND"
+            echo ""
+            echo "Remove any secrets from your patch and push again."
+            exit 1
+          fi
+
+          echo "Secrets scan passed — no obvious secrets detected."
 
       - name: Fail if secrets found
-        if: steps.detect.outputs.is_patch_pr == 'true' && steps.secrets_scan.outcome == 'failure'
-        run: |
-          echo "TruffleHog detected secrets in the patch. PR rejected."
-          exit 1
+        if: false
+        run: echo "disabled — check is inline above"
 
       # -----------------------------------------------------------------------
       # STEP 7 — Post "validation in progress" comment
