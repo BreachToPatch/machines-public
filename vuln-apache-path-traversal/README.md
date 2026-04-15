@@ -24,7 +24,7 @@ Can you find a path to the root flag?
 | OS         | Ubuntu 22.04             |
 
 The machine runs **locally** on your machine via Vagrant + VirtualBox.
-See the [Red Team Guide](../../docs/GUIDE_REDTEAM.md) for setup instructions.
+See the [Red Team Guide](https://github.com/BreachToPatch/docs/blob/main/GUIDE_REDTEAM.md) for setup instructions.
 
 ---
 
@@ -49,7 +49,7 @@ The CI will automatically:
 1. Verify your branch name and folder ownership
 2. Start the machine's Docker services
 3. Run your `exploit.py` with `TARGET_IP=localhost TARGET_PORT=80`
-4. Verify the flag hash
+4. Verify the flag hash against `accepted_hashes.json`
 5. Post a comment on your PR with the result
 
 > ⚠️ **Rules:**
@@ -57,15 +57,10 @@ The CI will automatically:
 > - Your folder must be named exactly after your GitHub username
 > - Your PR must only touch files inside your own folder
 
-> 🩸 **First Blood:** If you are the first to pwn this machine, your `exploit.py` is
-> automatically locked as the regression test for all future patches. You earn the **First Blood** badge.
+> 🩸 **First Blood:** If you are the first to pwn this machine on the current version,
+> your `exploit.py` is locked as the regression test for all future patches. +100 pts.
 
-#### exploit.py requirements
-- Must work with `TARGET_IP` and `TARGET_PORT` as environment variables
-- Exit `0` + print `FLAG_OBTAINED:FLAG{...}` on success
-- Exit `1` if the vulnerability is not present
-- Exit `2` if the service is unreachable
-- See the [standard exploit format](../../docs/GUIDE_REDTEAM.md#exploit-format)
+For the full exploit format, see the [Red Team Guide](https://github.com/BreachToPatch/docs/blob/main/GUIDE_REDTEAM.md#exploit-format).
 
 ---
 
@@ -73,24 +68,63 @@ The CI will automatically:
 
 *(Available once the machine has been pwned at least once)*
 
-**Step 1 — Create your branch**
+**Step 1 — Get the source code**
+
+Fork the archive: `https://github.com/BreachToPatch/machines-archive/tree/main/vuln-apache-path-traversal-v1.0`
+
+**Step 2 — Create your branch**
 ```
 patch/{your-github-username}/vuln-apache-path-traversal
 ```
 Example: `patch/bob/vuln-apache-path-traversal`
 
-**Step 2 — Add your files** inside your own folder:
+**Step 3 — Add your files** inside your own folder:
 ```
 vuln-apache-path-traversal/writeups/patch/{your-username}/
 ├── writeup.md            ← your patch writeup explaining the fix
-├── docker-compose.yml    ← your patched service definition
-└── <any other modified files>
+├── docker-compose.yml    ← CI test compose file (see required format below)
+└── patch/                ← your patched files, mirroring the machine structure
+    └── app/
+        └── apache/
+            ├── Dockerfile    ← MUST have ARG FLAG_VALUE (see guide)
+            └── httpd.conf    ← (or whichever files you modified)
 ```
 
-**Step 3 — Open a Pull Request**
+**Required `docker-compose.yml` format:**
+```yaml
+services:
+  apache:
+    build:
+      context: ./patch/app/apache/
+      args:
+        FLAG_VALUE: ${FLAG_VALUE}   # ← required — CI injects the validation flag here
+    ports:
+      - "80:80"
+```
 
-The CI will automatically run the locked exploit against your patch.
-See the [Blue Team Guide](../../docs/GUIDE_BLUETEAM.md) for detailed instructions.
+**Required `Dockerfile` pattern inside `patch/`:**
+```dockerfile
+FROM httpd:2.4.49   # (or the version you chose as fix)
+
+# ... your security fix here ...
+
+ARG FLAG_VALUE=FLAG{PLACEHOLDER}   # ← required — do not remove
+RUN mkdir -p /root \
+    && echo "$FLAG_VALUE" > /root/flag.txt \
+    && chmod 400 /root/flag.txt
+
+EXPOSE 80
+```
+
+**Step 4 — Open a Pull Request**
+
+The CI will:
+1. Run structural checks immediately (< 30s)
+2. Post "🕐 Validation in progress"
+3. Build your image with the injected flag and replay the locked exploit (~3 min)
+4. Post the final result ✅ or ❌
+
+See the [Blue Team Guide](https://github.com/BreachToPatch/docs/blob/main/GUIDE_BLUETEAM.md) for full instructions.
 
 ---
 
