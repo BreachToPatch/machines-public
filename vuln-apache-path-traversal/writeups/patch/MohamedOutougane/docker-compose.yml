@@ -1,0 +1,9 @@
+services:
+  apache:
+    build:
+      context: ./patch/app/apache/
+      args:
+        FLAG_VALUE: ${FLAG_VALUE}
+    ports:
+      - "80:80"
+    restart: unless-stopped
