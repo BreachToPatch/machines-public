@@ -1,4 +1,4 @@
-# Machine: Bee-Path (v1.0)
+# Machine: Bee-Path (v1)
 
 **Difficulty**: Easy
 **Category**: Web / Path Traversal
@@ -70,7 +70,7 @@ For the full exploit format, see the [Red Team Guide](https://github.com/BreachT
 
 **Step 1 — Get the source code**
 
-Fork the archive: `https://github.com/BreachToPatch/machines-archive/tree/main/vuln-apache-path-traversal-v1.0`
+Fork the archive: `https://github.com/BreachToPatch/machines-archive/tree/main/vuln-apache-path-traversal-v1`
 
 **Step 2 — Create your branch**
 ```

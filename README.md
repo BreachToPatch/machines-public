@@ -21,7 +21,7 @@ machines-public/
 │
 └── vuln-apache-path-traversal/             ← One folder per machine
     ├── README.md                           # Public description, rules, flag hash, download link
-    ├── CHANGELOG.md                        # Version history (v1.0, v1.1 after patches, etc.)
+    ├── CHANGELOG.md                        # Version history (v1, v2 after patches, etc.)
     ├── writeups/
     │   ├── attack/                         # Red Team submissions — one folder per player
     │   │   └── {github-username}/
