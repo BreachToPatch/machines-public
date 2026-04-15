@@ -471,13 +471,13 @@ jobs:
               inputs: {
                 machine_name:    machineName,
                 machine_slug:    machine,
-                version:         'v1.0',
+                version:         'v1',
                 pr_url:          prUrl,
                 first_blood_by:  username,
               }
             });
 
-            console.log(`Archive workflow dispatched for ${machine} (${machineName}) v1.0`);
+            console.log(`Archive workflow dispatched for ${machine} (${machineName}) v1`);
 
       # -----------------------------------------------------------------------
       # STEP 13 — Post result comment on the PR

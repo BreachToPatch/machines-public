@@ -1,9 +1,9 @@
 {
   "machine_slug": "vuln-apache-path-traversal",
-  "current_version": "v1.0",
+  "current_version": "v1",
   "versions": [
     {
-      "version": "v1.0",
+      "version": "v1",
       "flag_sha256": "280072fcc625c14d053e1f46d45621459551e0c8ff167fb1b51650c2b861be3d",
       "released_at": "2026-04-14T00:00:00Z",
       "retired": false,

@@ -5,9 +5,9 @@ name: Auto Tag on Merge
 #
 # Tag format: {machine-name}/v{N+1}
 # Examples:
-#   vuln-apache-path-traversal/v1.0  ← initial release
-#   vuln-apache-path-traversal/v1.1  ← after first patch
-#   vuln-apache-path-traversal/v1.2  ← after second patch
+#   vuln-apache-path-traversal/v1  ← initial release
+#   vuln-apache-path-traversal/v2  ← after first patch
+#   vuln-apache-path-traversal/v3  ← after second patch
 
 on:
   pull_request:
@@ -59,7 +59,7 @@ jobs:
 
       # -----------------------------------------------------------------------
       # Find the latest existing tag for this machine and increment it
-      # If no tag exists yet, start at v1.0
+      # If no tag exists yet, start at v1
       # -----------------------------------------------------------------------
       - name: Calculate next version
         if: steps.detect.outputs.should_tag == 'true'
@@ -76,7 +76,7 @@ jobs:
 
           if [ -z "$LATEST" ]; then
             # No tag exists yet — this is the initial release
-            NEXT="${MACHINE}/v1.0"
+            NEXT="${MACHINE}/v1"
           else
             # Extract the version number and increment the minor version
             CURRENT_VERSION=$(echo "$LATEST" | sed "s|${MACHINE}/v||")
