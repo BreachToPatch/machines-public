@@ -157,7 +157,6 @@ jobs:
         id: secrets_scan
         uses: trufflesecurity/trufflehog@main
         with:
-          path: ${{ steps.detect.outputs.patch_dir }}
           base: ${{ github.event.pull_request.base.sha }}
           head: ${{ github.event.pull_request.head.sha }}
           extra_args: --only-verified
