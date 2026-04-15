@@ -2,18 +2,21 @@ name: Validate Patch Submission
 
 # Triggers when a Blue Teamer opens a PR adding files in writeups/patch/.
 #
-# Required branch name convention: patch/{github-username}/{machine-name}
-# Example: patch/alice/vuln-apache-path-traversal
+# This workflow handles STRUCTURAL checks only (branch naming, files, scope,
+# secrets scan). The actual security test (exploit regression + flag injection)
+# is delegated to validate-patch-private.yml in btop-sources/machines-sources,
+# which is the only place that has access to the real flag value.
 #
-# Expected PR structure (player submits only their own folder):
-#   writeups/patch/{github-username}/writeup.md
-#   writeups/patch/{github-username}/docker-compose.yml
-#   writeups/patch/{github-username}/<any other patched files>
+# Required secret (in BreachToPatch/machines-public):
+#   PROMOTE_TRIGGER_TOKEN — PAT with workflow scope on btop-sources/machines-sources
+#                           Allows dispatching validate-patch-private.yml.
 #
-# Security checks:
-#   - Branch name must follow the convention patch/{username}/{machine}
-#   - Folder name must match the PR author's GitHub username
-#   - PR must only touch files inside the player's own folder
+# Flow:
+#   1. This workflow runs structural checks (steps 1-6)
+#   2. Posts a "validation in progress" comment
+#   3. Dispatches validate-patch-private.yml with the PR details
+#   4. validate-patch-private.yml runs the real test and posts the final result
+#   5. Maintainer waits for the private CI result before merging
 
 on:
   pull_request:
@@ -26,8 +29,8 @@ permissions:
   contents: read
 
 jobs:
-  validate-patch:
-    name: Validate Patch
+  structural-checks:
+    name: Structural checks + dispatch
     runs-on: ubuntu-latest
 
     steps:
@@ -44,37 +47,24 @@ jobs:
         id: branch
         run: |
           BRANCH="${{ github.head_ref }}"
-          echo "Branch name: $BRANCH"
 
           if [[ ! "$BRANCH" =~ ^patch/[^/]+/[^/]+$ ]]; then
-            echo "Invalid branch name: '$BRANCH'"
-            echo ""
-            echo "Your branch must follow this convention:"
-            echo "  patch/{your-github-username}/{machine-name}"
-            echo ""
-            echo "Examples:"
-            echo "  patch/alice/vuln-apache-path-traversal"
-            echo "  patch/bob/vuln-apache-path-traversal"
+            echo "Invalid branch: '$BRANCH'"
+            echo "Expected: patch/{your-username}/{machine-name}"
             exit 1
           fi
 
-          BRANCH_USERNAME=$(echo "$BRANCH" | cut -d'/' -f2)
-          BRANCH_MACHINE=$(echo "$BRANCH"  | cut -d'/' -f3)
-
-          echo "branch_username=$BRANCH_USERNAME" >> $GITHUB_OUTPUT
-          echo "branch_machine=$BRANCH_MACHINE"   >> $GITHUB_OUTPUT
-          echo "Branch convention check passed — user: $BRANCH_USERNAME, machine: $BRANCH_MACHINE"
+          echo "branch_username=$(echo "$BRANCH" | cut -d'/' -f2)" >> $GITHUB_OUTPUT
+          echo "branch_machine=$(echo "$BRANCH"  | cut -d'/' -f3)" >> $GITHUB_OUTPUT
+          echo "Branch OK: $BRANCH"
 
       # -----------------------------------------------------------------------
       # STEP 2 — Detect machine and patch author from changed file paths
-      # Expected path: {machine}/writeups/patch/{username}/
       # -----------------------------------------------------------------------
       - name: Detect machine and patch author
         id: detect
         run: |
           CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
-          echo "Changed files:"
-          echo "$CHANGED"
 
           PATCH_PATH=$(echo "$CHANGED" \
             | grep -E '^[^/]+/writeups/patch/[^/]+/' \
@@ -82,116 +72,85 @@ jobs:
 
           if [ -z "$PATCH_PATH" ]; then
             echo "is_patch_pr=false" >> $GITHUB_OUTPUT
-            echo "No patch files detected — skipping."
             exit 0
           fi
 
           MACHINE=$(echo "$PATCH_PATH"  | cut -d'/' -f1)
           USERNAME=$(echo "$PATCH_PATH" | cut -d'/' -f4)
-          PATCH_DIR="${MACHINE}/writeups/patch/${USERNAME}"
 
-          echo "machine=$MACHINE"     >> $GITHUB_OUTPUT
-          echo "username=$USERNAME"   >> $GITHUB_OUTPUT
-          echo "patch_dir=$PATCH_DIR" >> $GITHUB_OUTPUT
-          echo "is_patch_pr=true"     >> $GITHUB_OUTPUT
-          echo "Machine: $MACHINE | Patch author: $USERNAME"
+          echo "machine=$MACHINE"                                    >> $GITHUB_OUTPUT
+          echo "username=$USERNAME"                                  >> $GITHUB_OUTPUT
+          echo "patch_dir=${MACHINE}/writeups/patch/${USERNAME}"     >> $GITHUB_OUTPUT
+          echo "is_patch_pr=true"                                    >> $GITHUB_OUTPUT
+          echo "Machine: $MACHINE | Author: $USERNAME"
 
       # -----------------------------------------------------------------------
-      # STEP 3 — Cross-check branch name vs folder name vs PR author
+      # STEP 3 — Cross-check branch, folder, and PR author
       # -----------------------------------------------------------------------
-      - name: Cross-check branch, folder, and PR author
+      - name: Cross-check identity
         if: steps.detect.outputs.is_patch_pr == 'true'
         run: |
           PR_AUTHOR="${{ github.event.pull_request.user.login }}"
-          FOLDER_USERNAME="${{ steps.detect.outputs.username }}"
+          FOLDER_USER="${{ steps.detect.outputs.username }}"
+          BRANCH_USER="${{ steps.branch.outputs.branch_username }}"
           FOLDER_MACHINE="${{ steps.detect.outputs.machine }}"
-          BRANCH_USERNAME="${{ steps.branch.outputs.branch_username }}"
           BRANCH_MACHINE="${{ steps.branch.outputs.branch_machine }}"
           ERRORS=""
 
-          echo "PR author:      $PR_AUTHOR"
-          echo "Folder user:    $FOLDER_USERNAME"
-          echo "Branch user:    $BRANCH_USERNAME"
-          echo "Folder machine: $FOLDER_MACHINE"
-          echo "Branch machine: $BRANCH_MACHINE"
-
-          if [ "$PR_AUTHOR" != "$FOLDER_USERNAME" ]; then
-            ERRORS="${ERRORS}\n- PR author (@${PR_AUTHOR}) does not match folder name (${FOLDER_USERNAME})."
-          fi
-
-          if [ "$PR_AUTHOR" != "$BRANCH_USERNAME" ]; then
-            ERRORS="${ERRORS}\n- PR author (@${PR_AUTHOR}) does not match branch username (${BRANCH_USERNAME})."
-          fi
-
-          if [ "$FOLDER_MACHINE" != "$BRANCH_MACHINE" ]; then
-            ERRORS="${ERRORS}\n- Machine in folder (${FOLDER_MACHINE}) does not match machine in branch (${BRANCH_MACHINE})."
-          fi
+          [ "$PR_AUTHOR" != "$FOLDER_USER"   ] && ERRORS="$ERRORS\n- PR author (@${PR_AUTHOR}) ≠ folder name (${FOLDER_USER})"
+          [ "$PR_AUTHOR" != "$BRANCH_USER"   ] && ERRORS="$ERRORS\n- PR author (@${PR_AUTHOR}) ≠ branch username (${BRANCH_USER})"
+          [ "$FOLDER_MACHINE" != "$BRANCH_MACHINE" ] && ERRORS="$ERRORS\n- Machine in folder (${FOLDER_MACHINE}) ≠ machine in branch (${BRANCH_MACHINE})"
 
           if [ -n "$ERRORS" ]; then
-            echo -e "Consistency check failed:${ERRORS}"
-            echo ""
-            echo "Make sure your branch is named: patch/${PR_AUTHOR}/${FOLDER_MACHINE}"
+            echo -e "Identity check failed:$ERRORS"
             exit 1
           fi
 
-          echo "All consistency checks passed."
+          echo "Identity check passed."
 
       # -----------------------------------------------------------------------
-      # STEP 4 — Check that all required files are present
+      # STEP 4 — Check required files and structure
       # -----------------------------------------------------------------------
       - name: Check required files
         if: steps.detect.outputs.is_patch_pr == 'true'
         run: |
           MACHINE="${{ steps.detect.outputs.machine }}"
-          PATCH_DIR="${{ steps.detect.outputs.patch_dir }}"
+          USERNAME="${{ steps.detect.outputs.username }}"
+          PATCH_DIR="${MACHINE}/writeups/patch/${USERNAME}"
           ERRORS=""
 
-          if [ ! -f "${PATCH_DIR}/writeup.md" ]; then
-            ERRORS="${ERRORS}\n- Missing: \`${PATCH_DIR}/writeup.md\`"
-          fi
-
-          if [ ! -f "${PATCH_DIR}/docker-compose.yml" ]; then
-            ERRORS="${ERRORS}\n- Missing: \`${PATCH_DIR}/docker-compose.yml\`"
-          fi
-
-          # The locked exploit MUST exist — machine must have been pwned first
-          if [ ! -f "${MACHINE}/exploit/exploit.py" ]; then
-            ERRORS="${ERRORS}\n- Cannot validate patch: no locked \`exploit/exploit.py\` found."
-            ERRORS="${ERRORS}\n  The machine must be pwned at least once before patches can be submitted."
-          fi
+          [ ! -f "${PATCH_DIR}/writeup.md"         ] && ERRORS="$ERRORS\n- Missing: \`${PATCH_DIR}/writeup.md\`"
+          [ ! -f "${PATCH_DIR}/docker-compose.yml" ] && ERRORS="$ERRORS\n- Missing: \`${PATCH_DIR}/docker-compose.yml\`"
+          [ ! -d "${PATCH_DIR}/patch"              ] && ERRORS="$ERRORS\n- Missing: \`${PATCH_DIR}/patch/\` folder (your patched files, mirrors machine structure)"
+          [ ! -f "${MACHINE}/exploit/exploit.py"   ] && ERRORS="$ERRORS\n- No locked \`exploit/exploit.py\` — machine must be pwned first"
 
           if [ -n "$ERRORS" ]; then
-            echo -e "Required files missing:${ERRORS}"
+            echo -e "Required files missing:$ERRORS"
             exit 1
           fi
 
           echo "All required files present."
 
       # -----------------------------------------------------------------------
-      # STEP 5 — Verify the PR only touches the player's own folder
+      # STEP 5 — Verify PR only touches the player's own folder
       # -----------------------------------------------------------------------
       - name: Verify PR scope
         if: steps.detect.outputs.is_patch_pr == 'true'
         run: |
-          MACHINE="${{ steps.detect.outputs.machine }}"
-          USERNAME="${{ steps.detect.outputs.username }}"
-          ALLOWED_PREFIX="${MACHINE}/writeups/patch/${USERNAME}/"
-
+          ALLOWED="${{ steps.detect.outputs.machine }}/writeups/patch/${{ steps.detect.outputs.username }}/"
           CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
-          VIOLATIONS=$(echo "$CHANGED" | grep -v "^${ALLOWED_PREFIX}" || true)
+          VIOLATIONS=$(echo "$CHANGED" | grep -v "^${ALLOWED}" || true)
 
           if [ -n "$VIOLATIONS" ]; then
             echo "PR touches files outside your allowed folder:"
             echo "$VIOLATIONS"
-            echo ""
-            echo "Your PR must only add files inside: ${ALLOWED_PREFIX}"
             exit 1
           fi
 
           echo "Scope check passed."
 
       # -----------------------------------------------------------------------
-      # STEP 6 — Scan the patch for accidentally committed secrets
+      # STEP 6 — Scan patch for accidentally committed secrets
       # -----------------------------------------------------------------------
       - name: Scan patch for secrets
         if: steps.detect.outputs.is_patch_pr == 'true'
@@ -204,155 +163,84 @@ jobs:
           extra_args: --only-verified
         continue-on-error: true
 
-      - name: Fail if secrets were found
+      - name: Fail if secrets found
         if: steps.detect.outputs.is_patch_pr == 'true' && steps.secrets_scan.outcome == 'failure'
         run: |
-          echo "TruffleHog detected secrets in the patch files. PR rejected."
+          echo "TruffleHog detected secrets in the patch. PR rejected."
           exit 1
 
       # -----------------------------------------------------------------------
-      # STEP 7 — Build and start the patched Docker services
-      # The patch files live in writeups/patch/{username}/
-      # The flag is injected via secret for the regression test.
+      # STEP 7 — Post "validation in progress" comment
       # -----------------------------------------------------------------------
-      - name: Build and start patched Docker services
-        if: steps.detect.outputs.is_patch_pr == 'true'
-        id: services
-        env:
-          FLAG_VALUE: ${{ secrets.BEE_PATH_FLAG }}
-        run: |
-          PATCH_DIR="${{ steps.detect.outputs.patch_dir }}"
-
-          docker compose -f "${PATCH_DIR}/docker-compose.yml" build \
-            --build-arg FLAG_VALUE="$FLAG_VALUE"
-
-          docker compose -f "${PATCH_DIR}/docker-compose.yml" up -d
-
-          echo "Waiting for services to be ready..."
-          for i in $(seq 1 6); do
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-              --max-time 5 http://localhost:80/ || echo "000")
-
-            if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "403" ]]; then
-              echo "Service is UP (HTTP $HTTP_CODE)"
-              echo "status=up" >> $GITHUB_OUTPUT
-              break
-            fi
-
-            echo "Attempt $i/6 — HTTP $HTTP_CODE — retrying in 10s..."
-            sleep 10
-          done
-
-          if ! grep -q "status=up" "$GITHUB_OUTPUT"; then
-            echo "Service did not start — SLA violation."
-            echo "status=down" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-
-      # -----------------------------------------------------------------------
-      # STEP 8 — SLA health check
-      # -----------------------------------------------------------------------
-      - name: SLA health check
-        if: steps.detect.outputs.is_patch_pr == 'true'
-        id: sla
-        run: |
-          MACHINE="${{ steps.detect.outputs.machine }}"
-
-          if [ -f "${MACHINE}/tests/health_check.sh" ]; then
-            TARGET_IP=localhost TARGET_PORT=80 bash "${MACHINE}/tests/health_check.sh"
-          else
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:80/)
-            if [[ "$HTTP_CODE" != "200" && "$HTTP_CODE" != "403" ]]; then
-              echo "SLA check failed: HTTP $HTTP_CODE"
-              exit 1
-            fi
-          fi
-
-          echo "SLA check passed."
-
-      # -----------------------------------------------------------------------
-      # STEP 9 — Replay the locked exploit against the patched version
-      # Exit 1 = good (vulnerability fixed)
-      # Exit 0 = bad (patch insufficient)
-      # Exit 2 = bad (SLA violation)
-      # -----------------------------------------------------------------------
-      - name: Run exploit regression test
-        if: steps.detect.outputs.is_patch_pr == 'true'
-        id: regression
-        run: |
-          MACHINE="${{ steps.detect.outputs.machine }}"
-
-          set +e
-          TARGET_IP=localhost TARGET_PORT=80 \
-            python3 "${MACHINE}/exploit/exploit.py" 2>/tmp/exploit_stderr
-          EXIT_CODE=$?
-          set -e
-
-          echo "Exploit exit code: $EXIT_CODE"
-          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
-
-          case $EXIT_CODE in
-            0) echo "result=insufficient"  >> $GITHUB_OUTPUT ;;
-            1) echo "result=effective"     >> $GITHUB_OUTPUT ;;
-            2) echo "result=sla_violation" >> $GITHUB_OUTPUT ;;
-            *) echo "result=unknown"       >> $GITHUB_OUTPUT ;;
-          esac
-
-      # -----------------------------------------------------------------------
-      # STEP 10 — Post result comment on the PR
-      # -----------------------------------------------------------------------
-      - name: Post result comment on PR
+      - name: Post in-progress comment
         if: steps.detect.outputs.is_patch_pr == 'true'
         uses: actions/github-script@v7
         with:
           script: |
-            const machine    = '${{ steps.detect.outputs.machine }}';
-            const username   = '${{ steps.detect.outputs.username }}';
-            const regression = '${{ steps.regression.outputs.result }}';
-            const sla        = '${{ steps.sla.outcome }}';
-
-            let status, detail;
-
-            if (regression === 'effective' && sla === 'success') {
-              status = '✅ PATCH ACCEPTED';
-              detail = `The exploit was successfully blocked by your patch (exit code \`1\`).
-            All services are still responding (SLA check passed).
-            A maintainer will review your writeup and merge this PR.
-            > This version will become the next release of the machine and reset the Red Team phase.`;
-            } else if (regression === 'insufficient') {
-              status = '❌ PATCH REJECTED — Vulnerability not fixed';
-              detail = `The original exploit still works on your patched version (exit code \`0\`).
-            Your patch does not fully neutralize the vulnerability.
-            Study the exploit more carefully and try again.`;
-            } else if (regression === 'sla_violation' || sla === 'failure') {
-              status = '❌ PATCH REJECTED — SLA Violation';
-              detail = `One or more services stopped responding after applying your patch.
-            A patch must fix the vulnerability **without breaking the existing services**.
-            Check that \`docker compose up\` still starts all services correctly.`;
-            } else {
-              status = '⚠️ VALIDATION ERROR';
-              detail = 'An unexpected error occurred during validation. A maintainer will investigate.';
-            }
-
-            const body = `## 🐝 BtoP — Patch Validation: ${status}
-
-            **Machine:** \`${machine}\`
-            **Patch by:** @${username}
-
-            ${detail}`;
-
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner:        context.repo.owner,
               repo:         context.repo.repo,
-              body
+              body: `## 🐝 BtoP — Patch Validation: 🕐 IN PROGRESS
+
+            **Machine:** \`${{ steps.detect.outputs.machine }}\`
+            **Patch by:** @${{ steps.detect.outputs.username }}
+
+            Structural checks passed ✅ — the security test is now running in the private CI.
+            This involves building your patched Docker image, injecting a validation flag, and replaying the locked exploit.
+
+            Results will be posted here in ~3 minutes.`
             });
 
       # -----------------------------------------------------------------------
-      # STEP 11 — Always clean up
+      # STEP 8 — Dispatch validate-patch-private.yml in btop-sources
       # -----------------------------------------------------------------------
-      - name: Stop Docker services
-        if: always() && steps.detect.outputs.is_patch_pr == 'true'
-        run: |
-          PATCH_DIR="${{ steps.detect.outputs.patch_dir }}"
-          docker compose -f "${PATCH_DIR}/docker-compose.yml" down --volumes 2>/dev/null || true
+      - name: Dispatch private validation workflow
+        if: steps.detect.outputs.is_patch_pr == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PROMOTE_TRIGGER_TOKEN }}
+          script: |
+            const machine  = '${{ steps.detect.outputs.machine }}';
+            const username = '${{ steps.detect.outputs.username }}';
+            const branch   = context.payload.pull_request.head.ref;
+            const prNumber = String(context.issue.number);
+
+            // Map public slug → internal machine name
+            const slugToName = {
+              'vuln-apache-path-traversal': 'bee-path',
+            };
+
+            const machineName = slugToName[machine];
+            if (!machineName) {
+              core.setFailed(`No internal machine name mapping for slug "${machine}"`);
+              return;
+            }
+
+            // Read the current version from accepted_hashes.json
+            const hashesResp = await github.rest.repos.getContent({
+              owner: 'BreachToPatch',
+              repo:  'machines-public',
+              path:  `${machine}/accepted_hashes.json`
+            });
+            const hashesData = JSON.parse(
+              Buffer.from(hashesResp.data.content, 'base64').toString('utf8')
+            );
+            const currentVersion = hashesData.current_version;
+
+            await github.rest.actions.createWorkflowDispatch({
+              owner:       'btop-sources',
+              repo:        'machines-sources',
+              workflow_id: 'validate-patch-private.yml',
+              ref:         'main',
+              inputs: {
+                machine_name:    machineName,
+                machine_slug:    machine,
+                current_version: currentVersion,
+                pr_number:       prNumber,
+                patch_branch:    branch,
+                patch_username:  username
+              }
+            });
+
+            console.log(`Dispatched validate-patch-private.yml — machine: ${machineName}, version: ${currentVersion}`);
