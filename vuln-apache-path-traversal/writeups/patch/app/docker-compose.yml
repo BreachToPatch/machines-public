@@ -1,0 +1,14 @@
+services:
+  apache:
+    build:
+      context: ./apache
+      dockerfile: Dockerfile
+    container_name: bee-path-apache
+    # Map port 80 of the VM to port 80 of the container
+    ports:
+      - "80:80"
+    # Give the container read access to the host's /root/flag.txt
+    # so the exploit can read it via RCE
+    volumes:
+      - /root/flag.txt:/root/flag.txt:ro
+    restart: unless-stopped
