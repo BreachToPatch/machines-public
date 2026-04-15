@@ -18,7 +18,7 @@ and combined with mod_cgi, leads to unauthenticated Remote Code Execution.
 ## Enumeration
 
 Port scan reveals HTTP on port 80. The server banner identifies Apache 2.4.49,
-a version known to be vulnerable to CVE-2021-41773.
+a version known to be vulnerable to CVE-2021-41773. test
 
 ---
 
