@@ -6,7 +6,7 @@
 > **Date:** 2026-04-15
 
 ## 1. Summary
-Apache 2.4.49 is vulnerable to a path normalization flaw (CVE-2021-41773). My patch updates the base image to `httpd:2.4.51`, which contains the upstream fix, and restricts access to the root directory to neutralize directory traversal.
+Apache 2.4.49 is vulnerable to a path normalization flaw (CVE-2021-41773). My patch updates the base image to `httpd:2.4.51`, which contains the upstream fix, and restricts access to the root directory to neutralize directory traversal .
 
 ## 2. Root cause analysis
 The vulnerability exists because Apache 2.4.49 does not properly handle encoded dots (`%2e`). Coupled with a `Require all granted` directive on the root directory (`<Directory />`), this allows escaping the document root.
