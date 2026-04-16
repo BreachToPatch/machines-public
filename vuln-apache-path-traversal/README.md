@@ -1,4 +1,4 @@
-# Machine: Bee-Path (v1)
+# Machine: Bee-Path (v2)
 
 **Difficulty**: Easy
 **Category**: Web / Path Traversal
@@ -131,7 +131,7 @@ See the [Blue Team Guide](https://github.com/BreachToPatch/docs/blob/main/GUIDE_
 ### Flag Hash (SHA-256)
 
 ```
-280072fcc625c14d053e1f46d45621459551e0c8ff167fb1b51650c2b861be3d
+7098b7d57c194214eeaf1d928c4eb768918ae9bd5b96b58b6e5685d4a2447efe
 ```
 
 To verify your flag locally:

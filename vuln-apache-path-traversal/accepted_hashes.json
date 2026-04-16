@@ -1,6 +1,6 @@
 {
   "machine_slug": "vuln-apache-path-traversal",
-  "current_version": "v1",
+  "current_version": "v2",
   "versions": [
     {
       "version": "v1",
@@ -8,6 +8,13 @@
       "released_at": "2026-04-14T00:00:00Z",
       "retired": false,
       "note": "Initial release — Apache 2.4.49 CVE-2021-41773"
+    },
+    {
+      "version": "v2",
+      "flag_sha256": "7098b7d57c194214eeaf1d928c4eb768918ae9bd5b96b58b6e5685d4a2447efe",
+      "released_at": "2026-04-16T08:07:12Z",
+      "retired": false,
+      "note": "Rotated after patch (v1 → v2)"
     }
   ]
 }
